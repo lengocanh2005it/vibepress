@@ -91,6 +91,56 @@ describe('ValidatorService render-contract coverage', () => {
     expect(issue).toBeNull();
   });
 
+  it('does not require footer-links for CTA-style footer partials whose plan has no footer link columns', () => {
+    const check = (
+      service as unknown as {
+        checkCodeStructure: (
+          code: string,
+          context?: {
+            componentName?: string;
+            dataNeeds?: string[];
+            type?: 'page' | 'partial';
+            visualPlan?: ComponentVisualPlan;
+          },
+        ) => { isValid: boolean; error?: string };
+      }
+    ).checkCodeStructure(
+      `
+        import React from 'react';
+
+        const Footer: React.FC = () => {
+          return (
+            <footer>
+              <div className="pg-footer-center-row">
+                <h2>Let's Work Together</h2>
+                <p>CTA footer body</p>
+              </div>
+            </footer>
+          );
+        };
+
+        export default Footer;
+      `,
+      {
+        componentName: 'Footer',
+        dataNeeds: [],
+        type: 'partial',
+        visualPlan: {
+          componentName: 'Footer',
+          sections: [
+            {
+              type: 'footer',
+              menuColumns: [],
+            },
+          ],
+        } as ComponentVisualPlan,
+      },
+    );
+
+    expect(check.isValid).toBe(true);
+    expect(check.error).toBeUndefined();
+  });
+
   it('still reports uncovered hybrid source assets', () => {
     const renderContract = {
       version: 1,
@@ -151,6 +201,67 @@ describe('ValidatorService render-contract coverage', () => {
     ).checkRenderContractCoverage('<section />', renderContract, 'FrontPage');
 
     expect(issue).toContain('theme-asset:/assets/images/must-keep.jpg');
+  });
+
+  it('does not apply block-tree render coverage to AI section-centric pages', () => {
+    const renderContract = {
+      version: 1,
+      sourceModel: {
+        kind: 'block-tree',
+        blockTree: [
+          {
+            kind: 'heading',
+            blockName: 'core/heading',
+            text: 'Skills and Tools',
+            children: [],
+          },
+          {
+            kind: 'image',
+            blockName: 'core/image',
+            src: 'theme-asset:/assets/images/figma.png',
+            children: [],
+          },
+        ],
+      },
+      structure: {
+        renderMode: 'hybrid',
+        sharedChrome: {},
+        subtreeBindings: [],
+      },
+      preserveRules,
+      fallback: {
+        reason: 'section-centric plan owns source coverage',
+        sections: [
+          {
+            type: 'media-text',
+            heading: 'Welcome',
+          },
+        ],
+      },
+    } as unknown as ComponentRenderContract;
+
+    const issue = (
+      service as unknown as {
+        checkRenderContractCoverage: (
+          code: string,
+          renderContract?: ComponentRenderContract,
+          componentName?: string,
+          visualPlan?: ComponentVisualPlan,
+        ) => string | null;
+      }
+    ).checkRenderContractCoverage(
+      '<section><h1>Welcome</h1></section>',
+      renderContract,
+      'FrontPage',
+      {
+        componentName: 'FrontPage',
+        renderMode: 'section-centric',
+        renderAuthority: 'ai',
+        sections: [{ type: 'media-text', heading: 'Welcome' }],
+      } as ComponentVisualPlan,
+    );
+
+    expect(issue).toBeNull();
   });
 
   it('ignores generic listing labels for hybrid listing surfaces', () => {
@@ -400,6 +511,52 @@ describe('ValidatorService derived collection bindings', () => {
             {
               type: 'sidebar',
               widgets: [{ kind: 'tags', title: 'Tags' }],
+            },
+          ],
+        } as ComponentVisualPlan,
+      },
+    );
+
+    expect(result.isValid).toBe(true);
+    expect(result.error).toBeUndefined();
+  });
+
+  it('accepts post-terms bindings rendered from metaSource on deterministic detail surfaces', () => {
+    const result = service.checkCodeStructure(
+      `
+        import React from 'react';
+
+        type Product = { tags?: string[]; categories?: string[]; categorySlugs?: string[] };
+
+        export default function SingleProduct() {
+          const item: Product | null = null;
+          const metaSource: Product | null = item;
+
+          return (
+            <section>
+              {Array.isArray(metaSource?.tags) && metaSource?.tags.length > 0 ? (
+                <div>
+                  {metaSource?.tags.map((term, index) => (
+                    <React.Fragment key={term + '-' + index}>
+                      <span>{term}</span>
+                    </React.Fragment>
+                  ))}
+                </div>
+              ) : null}
+            </section>
+          );
+        }
+      `,
+      {
+        componentName: 'SingleProduct',
+        type: 'page',
+        dataNeeds: [],
+        visualPlan: {
+          componentName: 'SingleProduct',
+          sections: [
+            {
+              type: 'post-terms',
+              taxonomy: 'post_tag',
             },
           ],
         } as ComponentVisualPlan,

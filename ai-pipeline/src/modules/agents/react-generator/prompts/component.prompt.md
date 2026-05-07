@@ -393,8 +393,8 @@ Rules:
 ### Other rules
 
 - HTML from API:
-  - post/body HTML may use `dangerouslySetInnerHTML` when the approved render path expects raw post HTML
-  - page/body HTML should prefer `renderRichTextChildren(...)` or equivalent structured JSX instead of `dangerouslySetInnerHTML`
+  - post/body and page/body HTML must render through `renderRichTextChildren(...)` or equivalent structured JSX
+  - ⛔ NEVER render `.content` fields with `dangerouslySetInnerHTML`, including `post.content`, `page.content`, and `item.content`
 - WordPress upload/media URLs should use the local preview asset path exactly as provided (`/assets/...` or `/assets/images/...`). Do NOT rewrite them back to remote WordPress URLs.
 - PHP asset paths → extract ONLY the relative path after the closing `?>` tag, e.g. `<?php echo esc_url( get_template_directory_uri() ); ?>/assets/images/foo.jpg` → `/assets/images/foo.jpg`. ⛔ NEVER emit raw `<?php ... ?>` code inside a JSX attribute. If a value contains `<?php` and no extractable path remains after `?>`, treat it as an empty/absent value and omit the attribute entirely.
 - `<header>` → no background color (transparent)
@@ -511,7 +511,7 @@ Pre-parsed block tree. Each node may include: `block`, `align`, `textAlign`, `te
 | `columns`               | `flex flex-col md:flex-row` or CSS grid                                                                                                                                                                              |
 | `image`                 | `<img src={node.src}>` — skip if no src                                                                                                                                                                              |
 | `navigation`            | fetch `/api/menus`, NEVER static `<a>` — use `navigation-link` children labels to match the correct menu; fallback: `menus.find(m => m.location === 'primary') ?? menus.find(m => m.slug === 'primary') ?? menus[0]` |
-| `post-content` / `html` | render approved body HTML; for `post-content` raw `dangerouslySetInnerHTML` is acceptable, but page/body content should prefer structured rich-text rendering                                                                                                                                                                                            |
+| `post-content` / `html` | render approved body HTML through `renderRichTextChildren(...)` or equivalent structured JSX; never render `.content` fields with `dangerouslySetInnerHTML`                                                                                                                                                                                            |
 | `query-pagination`      | render ONLY if present in JSON, else omit                                                                                                                                                                            |
 
 `block: "query"` → fetch `/api/posts`, map over `post` results:
@@ -676,7 +676,7 @@ Only render blocks present in the template tree.
 
 ⛔ **CRITICAL — `post-content` / `page-content` double-render prevention:**
 
-When the template contains a `post-content`, `page-content`, or `html` block that renders the canonical body through the approved render path (`dangerouslySetInnerHTML` for post HTML or `renderRichTextChildren`/structured JSX for page HTML), ALL child content (headings, paragraphs, images, buttons) inside that block is already included in `item.content`. Do NOT also render those child blocks as separate JSX elements outside that canonical body render.
+When the template contains a `post-content`, `page-content`, or `html` block that renders the canonical body through the approved structured rich-text render path (`renderRichTextChildren` or equivalent JSX node rendering), ALL child content (headings, paragraphs, images, buttons) inside that block is already included in `item.content`. Do NOT also render those child blocks as separate JSX elements outside that canonical body render.
 
 ```tsx
 // ❌ WRONG — "About" heading is already inside item.content from the canonical body render

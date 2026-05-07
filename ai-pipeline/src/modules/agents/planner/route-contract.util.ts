@@ -3,6 +3,18 @@ import type { ComponentRenderContract } from './render-contract.schema.js';
 import { isPartialComponentName } from '../shared/component-kind.util.js';
 import type { RepoThemeManifest } from '../repo-analyzer/repo-analyzer.service.js';
 
+// Generic page-layout templates whose URL in WordPress comes from the assigned
+// page slug (via _wp_page_template meta), not from the template name. These
+// should stay on the canonical page route family so concrete-page expansion can
+// materialize them into real routes (or fold them into RuntimePage if unused).
+const FSE_GENERIC_PAGE_LAYOUT_BASES = new Set([
+  'blank',
+  'full-width',
+  'page-no-title',
+  'page-with-sidebar',
+  'page-wide',
+]);
+
 export type RouteContractDataNeed =
   | 'posts'
   | 'products'
@@ -32,6 +44,8 @@ export interface RouteContractInput {
   planningSourceSummary?: string;
   hasConcretePageBindings?: boolean;
   repoRouteHints?: RepoRouteHints;
+  readingSettings?: RouteContractReadingSettings;
+  homeMode?: DeterministicHomeMode;
 }
 
 export interface RepoRouteHints {
@@ -42,6 +56,17 @@ export interface RepoRouteHints {
   blockTypes: string[];
   notes: string[];
 }
+
+export interface RouteContractReadingSettings {
+  showOnFront?: 'page' | 'posts' | null;
+  pageOnFrontId?: number | null;
+  pageForPostsId?: number | null;
+}
+
+export type DeterministicHomeMode =
+  | 'front-page'
+  | 'posts-index'
+  | 'hybrid-home';
 
 export interface DeterministicRouteContract {
   archetype:
@@ -66,6 +91,8 @@ export interface DeterministicRouteContract {
   requiredDataNeeds: RouteContractDataNeed[];
   disallowedDetailDataNeeds: RouteContractDataNeed[];
   evidence: string[];
+  homeTemplateBase?: HomeTemplateBase | null;
+  homeMode?: DeterministicHomeMode | null;
 }
 
 export const HOME_TEMPLATE_PRIORITY = [
@@ -84,6 +111,34 @@ export interface HomeHierarchyResolution {
   routeByBase: Partial<Record<HomeTemplateBase, string>>;
   redundantBases: HomeTemplateBase[];
   explicitBases: HomeTemplateBase[];
+}
+
+function assignNonRootHomeAliases(input: {
+  routeByBase: Partial<Record<HomeTemplateBase, string>>;
+  hasBase: (base: HomeTemplateBase) => boolean;
+  redundantBases: Set<HomeTemplateBase>;
+  readingSettings?: RouteContractReadingSettings;
+  preferPostsIndexAlias?: boolean;
+}): void {
+  const {
+    routeByBase,
+    hasBase,
+    redundantBases,
+    readingSettings,
+    preferPostsIndexAlias,
+  } = input;
+  const postsIndexAlias = resolvePostsIndexAliasRoute({
+    readingSettings,
+    preferPostsIndexAlias,
+  });
+
+  if (redundantBases.has('home')) {
+    if (hasBase('index')) routeByBase['index'] = postsIndexAlias;
+    return;
+  }
+
+  if (hasBase('home')) routeByBase['home'] = '/home';
+  if (hasBase('index')) routeByBase['index'] = postsIndexAlias;
 }
 
 export function inferDeterministicRouteContract(
@@ -132,6 +187,15 @@ export function inferDeterministicRouteContract(
 
   if (HOME_TEMPLATE_PRIORITY_SET.has(templateBase)) {
     evidence.add(`home-template:${templateBase}`);
+    const homeTemplateBase = templateBase as HomeTemplateBase;
+    const homeMode = resolveDeterministicHomeMode({
+      templateBase: homeTemplateBase,
+      readingSettings: input.readingSettings,
+      declaredHomeMode: input.homeMode,
+      hasPostsSignal:
+        normalizedNeeds.has('posts') || signals.hasPostsIndexStructure,
+    });
+    evidence.add(`home-mode:${homeMode}`);
     return {
       archetype: templateBase === 'index' ? 'posts-index' : 'home',
       type: 'page',
@@ -140,7 +204,10 @@ export function inferDeterministicRouteContract(
       route: input.route ?? '/',
       routeMode: 'soft',
       isDetail: false,
-      requiredDataNeeds: [],
+      requiredDataNeeds:
+        normalizedNeeds.has('posts') || signals.hasPostsIndexStructure
+          ? ['posts']
+          : [],
       disallowedDetailDataNeeds: [
         'post-detail',
         'product-detail',
@@ -148,6 +215,8 @@ export function inferDeterministicRouteContract(
         'categoryDetail',
       ],
       evidence: [...evidence],
+      homeTemplateBase,
+      homeMode,
     };
   }
 
@@ -409,6 +478,47 @@ export function inferDeterministicRouteContract(
     });
   }
 
+  // Generic layout-only templates should stay on the canonical page route
+  // family. Named semantic templates such as template-about/contact/services
+  // keep their own route family unless they are expanded into exact page
+  // bindings later.
+  if (FSE_GENERIC_PAGE_LAYOUT_BASES.has(templateBase)) {
+    evidence.add('fse:page-layout-template');
+    return buildFixedArchetypeContract({
+      archetype: 'single-page',
+      route: '/page/:slug',
+      routeMode: 'hard',
+      isDetail: true,
+      requiredDataNeeds: ['page-detail'],
+      disallowedDetailDataNeeds: [
+        'post-detail',
+        'product-detail',
+        'categoryDetail',
+      ],
+      evidence,
+    });
+  }
+
+  if (
+    /^template-.+$/.test(templateBase) &&
+    (normalizedNeeds.has('page-detail') || input.isDetail === true)
+  ) {
+    evidence.add('named-page-template-detail');
+    return buildFixedArchetypeContract({
+      archetype: 'single-page',
+      route: `/${routeSlug}/:slug`,
+      routeMode: 'hard',
+      isDetail: true,
+      requiredDataNeeds: ['page-detail'],
+      disallowedDetailDataNeeds: [
+        'post-detail',
+        'product-detail',
+        'categoryDetail',
+      ],
+      evidence,
+    });
+  }
+
   if (
     /^single(?:-.+)?$/.test(templateBase) ||
     (normalizedNeeds.has('post-detail') && !normalizedNeeds.has('page-detail'))
@@ -450,7 +560,7 @@ export function inferDeterministicRouteContract(
     );
     return buildFixedArchetypeContract({
       archetype: 'single-page',
-      route: templateBase === 'page' ? '/page/:slug' : `/${routeSlug}/:slug`,
+      route: '/page/:slug',
       routeMode: 'hard',
       isDetail: true,
       requiredDataNeeds: ['page-detail'],
@@ -467,7 +577,12 @@ export function inferDeterministicRouteContract(
   return {
     archetype: 'static-page',
     type: 'page',
-    route: signals.normalizedRouteHint ?? `/${routeSlug}`,
+    route: resolveStaticPageFallbackRoute({
+      templateBase,
+      routeSlug,
+      routeHint: signals.normalizedRouteHint,
+      inputRoute: input.route,
+    }),
     routeMode: 'soft',
     isDetail: false,
     requiredDataNeeds: [],
@@ -541,8 +656,18 @@ export function resolveHomeHierarchy(input: {
   templateNames: string[];
   repoManifest?: RepoThemeManifest;
   explicitTemplateNames?: string[];
+  readingSettings?: RouteContractReadingSettings;
+  preferPostsIndexAlias?: boolean;
 }): HomeHierarchyResolution {
   const uniqueTemplateNames = Array.from(new Set(input.templateNames));
+  const showOnFront = input.readingSettings?.showOnFront ?? null;
+  const hasDbFrontPageEvidence =
+    Number(input.readingSettings?.pageOnFrontId ?? 0) > 0 ||
+    (input.explicitTemplateNames ?? []).some((templateName) =>
+      ['front-page', 'frontend-page'].includes(toTemplateBase(templateName)),
+    );
+  const preferPostsRootFamily =
+    showOnFront === 'posts' && !hasDbFrontPageEvidence;
   const homeEntries = uniqueTemplateNames
     .map((templateName) => ({
       templateName,
@@ -552,9 +677,22 @@ export function resolveHomeHierarchy(input: {
       (entry): entry is { templateName: string; base: HomeTemplateBase } =>
         !!entry.base,
     );
+  const effectiveHomeEntries =
+    preferPostsRootFamily &&
+    homeEntries.some((entry) => ['home', 'index'].includes(entry.base))
+      ? homeEntries.filter(
+          (entry) =>
+            entry.base === 'home' ||
+            entry.base === 'index' ||
+            !['frontend-page', 'front-page'].includes(entry.base),
+        )
+      : homeEntries;
 
-  const presentBases = HOME_TEMPLATE_PRIORITY.filter((base) =>
-    homeEntries.some((entry) => entry.base === base),
+  const orderingPriority = preferPostsRootFamily
+    ? (['home', 'index', 'frontend-page', 'front-page'] as const)
+    : HOME_TEMPLATE_PRIORITY;
+  const presentBases = orderingPriority.filter((base) =>
+    effectiveHomeEntries.some((entry) => entry.base === base),
   );
   const winnerBase = presentBases[0] ?? null;
   const explicitBases = collectExplicitHomeBases(
@@ -564,7 +702,8 @@ export function resolveHomeHierarchy(input: {
   const redundantBases = new Set<HomeTemplateBase>();
   const routeByBase: Partial<Record<HomeTemplateBase, string>> = {};
 
-  const hasBase = (base: HomeTemplateBase) => presentBases.includes(base);
+  const hasBase = (base: HomeTemplateBase) =>
+    homeEntries.some((entry) => entry.base === base);
   const hasExplicitHome = explicitBases.has('home');
   const canCollapseHomeIntoIndex =
     hasBase('home') &&
@@ -583,37 +722,51 @@ export function resolveHomeHierarchy(input: {
     if (hasBase('front-page')) {
       routeByBase['front-page'] = '/front-page';
     }
-    if (redundantBases.has('home')) {
-      routeByBase['index'] = '/blog';
-    } else {
-      if (hasBase('home')) routeByBase['home'] = '/blog';
-      if (hasBase('index')) {
-        routeByBase['index'] = hasExplicitHome ? '/index' : '/blog';
-      }
-    }
+    assignNonRootHomeAliases({
+      routeByBase,
+      hasBase,
+      redundantBases,
+      readingSettings: input.readingSettings,
+      preferPostsIndexAlias: input.preferPostsIndexAlias,
+    });
   } else if (winnerBase === 'front-page') {
     routeByBase['front-page'] = '/';
-    if (redundantBases.has('home')) {
-      routeByBase['index'] = '/blog';
-    } else {
-      if (hasBase('home')) routeByBase['home'] = '/blog';
-      if (hasBase('index')) {
-        routeByBase['index'] = hasExplicitHome ? '/index' : '/blog';
-      }
-    }
+    assignNonRootHomeAliases({
+      routeByBase,
+      hasBase,
+      redundantBases,
+      readingSettings: input.readingSettings,
+      preferPostsIndexAlias: input.preferPostsIndexAlias,
+    });
   } else if (winnerBase === 'home') {
     if (redundantBases.has('home')) {
       routeByBase['index'] = '/';
     } else {
       routeByBase['home'] = '/';
-      if (hasBase('index')) routeByBase['index'] = '/index';
+      if (hasBase('index')) {
+        routeByBase['index'] = resolvePostsIndexAliasRoute({
+          readingSettings: input.readingSettings,
+          preferPostsIndexAlias: input.preferPostsIndexAlias,
+        });
+      }
+    }
+    if (preferPostsRootFamily) {
+      if (hasBase('frontend-page'))
+        routeByBase['frontend-page'] = '/front-page';
+      if (hasBase('front-page')) routeByBase['front-page'] = '/front-page';
     }
   } else if (winnerBase === 'index') {
     routeByBase['index'] = '/';
+    if (preferPostsRootFamily) {
+      if (hasBase('frontend-page'))
+        routeByBase['frontend-page'] = '/front-page';
+      if (hasBase('front-page')) routeByBase['front-page'] = '/front-page';
+      if (hasBase('home')) routeByBase['home'] = '/blog';
+    }
   }
 
   const orderedTemplateNames = [
-    ...HOME_TEMPLATE_PRIORITY.flatMap((base) =>
+    ...orderingPriority.flatMap((base) =>
       homeEntries
         .filter(
           (entry) => entry.base === base && !redundantBases.has(entry.base),
@@ -632,6 +785,16 @@ export function resolveHomeHierarchy(input: {
     redundantBases: [...redundantBases],
     explicitBases: [...explicitBases],
   };
+}
+
+function resolvePostsIndexAliasRoute(input: {
+  readingSettings?: RouteContractReadingSettings;
+  preferPostsIndexAlias?: boolean;
+}): string {
+  return input.preferPostsIndexAlias ||
+    input.readingSettings?.showOnFront === 'posts'
+    ? '/blog'
+    : '/index';
 }
 
 function collectArchetypeSignals(
@@ -818,6 +981,37 @@ function collectArchetypeSignals(
     normalizedRouteHint,
     evidence,
   };
+}
+
+function resolveDeterministicHomeMode(input: {
+  templateBase: HomeTemplateBase;
+  readingSettings?: RouteContractReadingSettings;
+  declaredHomeMode?: DeterministicHomeMode;
+  hasPostsSignal: boolean;
+}): DeterministicHomeMode {
+  if (input.declaredHomeMode) {
+    return input.declaredHomeMode;
+  }
+
+  const showOnFront = input.readingSettings?.showOnFront ?? null;
+  const hasPostsPage = Number(input.readingSettings?.pageForPostsId ?? 0) > 0;
+
+  if (showOnFront === 'posts') {
+    return input.hasPostsSignal ? 'hybrid-home' : 'posts-index';
+  }
+
+  if (
+    input.templateBase === 'front-page' ||
+    input.templateBase === 'frontend-page'
+  ) {
+    return input.hasPostsSignal || hasPostsPage ? 'hybrid-home' : 'front-page';
+  }
+
+  if (input.templateBase === 'home' || input.templateBase === 'index') {
+    return 'posts-index';
+  }
+
+  return input.hasPostsSignal ? 'hybrid-home' : 'front-page';
 }
 
 function inferStructureFirstArchetype(input: {
@@ -1163,6 +1357,53 @@ function normalizeRouteHint(value?: string | null): string | null {
   if (trimmed === '*') return '*';
   const normalized = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
   return normalized.replace(/\/+$/, '') || '/';
+}
+
+function resolveStaticPageFallbackRoute(input: {
+  templateBase: string;
+  routeSlug: string;
+  routeHint: string | null;
+  inputRoute?: string | null;
+}): string {
+  const canonicalRoute = `/${input.routeSlug}`;
+  const normalizedInputRoute = normalizeRouteHint(input.inputRoute);
+  if (
+    normalizedInputRoute &&
+    normalizedInputRoute !== '/' &&
+    normalizedInputRoute !== '*' &&
+    !normalizedInputRoute.includes(':slug')
+  ) {
+    return normalizedInputRoute;
+  }
+
+  const routeHint = input.routeHint;
+  if (!routeHint || routeHint === '/' || routeHint === '*') {
+    return canonicalRoute;
+  }
+
+  const hintSlug =
+    routeHint.replace(/^\/+/, '').split('/')[0]?.toLowerCase() ?? '';
+  const templateSlug = input.routeSlug.toLowerCase();
+  const genericFamilyHints = new Set([
+    'blog',
+    'home',
+    'index',
+    'archive',
+    'search',
+    'single',
+    'page',
+    'front-page',
+  ]);
+
+  if (
+    hintSlug &&
+    hintSlug !== templateSlug &&
+    genericFamilyHints.has(hintSlug)
+  ) {
+    return canonicalRoute;
+  }
+
+  return routeHint;
 }
 
 function findMatchingEntrySourceChain(

@@ -1138,6 +1138,13 @@ function mapQuery(node: WpNode): PostListSection {
   const hasProductButtonBlock = templateNodes.some((child) =>
     ['woocommerce/product-button'].includes(child.block),
   );
+  const hasProductTemplateClass =
+    (postTemplate?.customClassNames ?? []).some((className) =>
+      /(^|\s)products?-block-post-template(\s|$)/i.test(className),
+    ) ||
+    (node.customClassNames ?? []).some((className) =>
+      /(^|\s)products?-block-post-template(\s|$)/i.test(className),
+    );
   const isProductQuery =
     String(node.params?.query?.postType ?? '').toLowerCase() === 'product' ||
     String(node.params?.namespace ?? '')
@@ -1145,7 +1152,9 @@ function mapQuery(node: WpNode): PostListSection {
       .includes('woocommerce/product-query') ||
     String(postTemplate?.params?.__woocommerceNamespace ?? '')
       .toLowerCase()
-      .includes('woocommerce/product-query');
+      .includes('woocommerce/product-query') ||
+    hasCommerceProductCardBlock ||
+    hasProductTemplateClass;
   const separatorNode = templateNodes.find((child) =>
     ['core/separator', 'separator'].includes(child.block),
   );
@@ -1169,6 +1178,9 @@ function mapQuery(node: WpNode): PostListSection {
       postTemplate?.params?.layout?.columnCount ??
       postTemplate?.params?.layout?.columns ??
       0,
+  );
+  const responsiveGridColumns = inferResponsivePostTemplateColumns(
+    postTemplate?.params?.layout?.minimumColumnWidth,
   );
   const columnsInTemplate =
     postTemplate?.children?.some(
@@ -1200,6 +1212,10 @@ function mapQuery(node: WpNode): PostListSection {
         ? 'grid-3'
         : displayColumns === 2
           ? 'grid-2'
+          : responsiveGridColumns >= 3
+            ? 'grid-3'
+            : responsiveGridColumns === 2
+              ? 'grid-2'
           : columnsInTemplate
             ? 'grid-3'
             : 'list';
@@ -1259,6 +1275,23 @@ function mapQuery(node: WpNode): PostListSection {
   };
 }
 
+function inferResponsivePostTemplateColumns(value: unknown): number {
+  if (value == null) return 0;
+  const raw = String(value).trim().toLowerCase();
+  if (!raw) return 0;
+  const numeric = Number(raw.replace(/[a-z%]+$/i, ''));
+  if (!Number.isFinite(numeric) || numeric <= 0) return 0;
+  const px =
+    raw.endsWith('rem') || raw.endsWith('em')
+      ? numeric * 16
+      : raw.endsWith('px')
+        ? numeric
+        : numeric;
+  if (px <= 360) return 3;
+  if (px <= 560) return 2;
+  return 1;
+}
+
 // ── columns block ───────────────────────────────────────────────────────────
 
 function mapColumns(
@@ -1274,6 +1307,8 @@ function mapColumns(
   const footer = buildFooterFromColumns(cols);
   if (footer) return footer;
 
+  if (cols.some((col) => columnContainsQuery(col))) return null;
+
   if (isDetailLayoutColumns(cols)) return null;
 
   // 2-col: check if one side is image and other is text → media-text
@@ -1286,7 +1321,10 @@ function mapColumns(
     .map((col) => {
       const flat = flattenChildren(col);
       const h = findFirstByBlock(flat, ['core/heading', 'heading']);
-      const img = findFirstByBlock(flat, ['core/image', 'image']);
+      const coverImg = flat.find(
+        (c) => (c.block === 'core/cover' || c.block === 'cover') && !!c.src,
+      );
+      const img = coverImg ?? findFirstByBlock(flat, ['core/image', 'image']);
       const body = extractRichTextFromNodes(flat);
       return {
         heading: h ? extractNodeText(h) : '',
@@ -1366,8 +1404,14 @@ function isStrictMediaTextColumns(cols: WpNode[]): boolean {
 }
 
 function columnContainsImage(col: WpNode): boolean {
-  return (
-    findFirstByBlock(flattenChildren(col), ['core/image', 'image']) !== null
+  const flat = flattenChildren(col);
+  return flat.some(isImageLikeNode);
+}
+
+function columnContainsQuery(col: WpNode): boolean {
+  const flat = flattenChildren(col);
+  return flat.some(
+    (node) => node.block === 'core/query' || node.block === 'query',
   );
 }
 
@@ -1375,8 +1419,7 @@ function columnIsImageDominant(col: WpNode): boolean {
   const meaningfulNonImageNodes = flattenChildren(col).filter((node) => {
     const block = node.block;
     if (
-      block === 'core/image' ||
-      block === 'image' ||
+      isImageLikeBlock(block) ||
       block === 'core/spacer' ||
       block === 'spacer' ||
       block === 'core/separator' ||
@@ -1406,15 +1449,16 @@ function columnIsImageDominant(col: WpNode): boolean {
     );
   });
 
-  return meaningfulNonImageNodes.length === 0;
+  if (meaningfulNonImageNodes.length === 0) return true;
+
+  return isCoverDominantMediaColumn(col);
 }
 
 function columnHasMeaningfulTextLikeContent(col: WpNode): boolean {
   return flattenChildren(col).some((node) => {
     const block = node.block;
     if (
-      block === 'core/image' ||
-      block === 'image' ||
+      isImageLikeBlock(block) ||
       block === 'core/spacer' ||
       block === 'spacer' ||
       block === 'core/separator' ||
@@ -1435,6 +1479,76 @@ function columnHasMeaningfulTextLikeContent(col: WpNode): boolean {
         .trim()
     );
   });
+}
+
+function isImageLikeBlock(block?: string): boolean {
+  return (
+    block === 'core/image' ||
+    block === 'image' ||
+    block === 'core/cover' ||
+    block === 'cover'
+  );
+}
+
+function isImageLikeNode(node: WpNode): boolean {
+  return (
+    node.block === 'core/image' ||
+    node.block === 'image' ||
+    ((node.block === 'core/cover' || node.block === 'cover') && !!node.src)
+  );
+}
+
+function isCoverDominantMediaColumn(col: WpNode): boolean {
+  let coverImageCount = 0;
+  const overlayTexts: string[] = [];
+  let hasMeaningfulOutsideCoverText = false;
+
+  const visit = (node: WpNode, insideCover = false) => {
+    const isCoverNode =
+      (node.block === 'core/cover' || node.block === 'cover') && !!node.src;
+    const nextInsideCover = insideCover || isCoverNode;
+    if (isCoverNode) {
+      coverImageCount += 1;
+    }
+
+    const block = node.block;
+    const isWrapper =
+      block === 'core/group' ||
+      block === 'group' ||
+      block === 'core/column' ||
+      block === 'column' ||
+      block === 'core/columns' ||
+      block === 'columns';
+
+    if (!isWrapper && !isImageLikeNode(node) && !isSpacerBlock(block)) {
+      const text = extractNodeText(node);
+      const normalizedText = text.replace(/\s+/g, ' ').trim();
+      if (normalizedText) {
+        if (nextInsideCover) {
+          overlayTexts.push(normalizedText);
+        } else {
+          hasMeaningfulOutsideCoverText = true;
+        }
+      }
+    }
+
+    for (const child of node.children ?? []) {
+      visit(child, nextInsideCover);
+    }
+  };
+
+  visit(col);
+
+  if (coverImageCount !== 1 || hasMeaningfulOutsideCoverText) {
+    return false;
+  }
+
+  return (
+    overlayTexts.length <= 1 &&
+    overlayTexts.every(
+      (text) => text.length <= 48 && text.split(/\s+/).length <= 6,
+    )
+  );
 }
 
 /** Cards where every entry has a short number/%-heavy heading → stats row. */
@@ -2491,6 +2605,12 @@ function mergeGroupedSections(
       continue;
     }
 
+    if (current.type === 'hero' && canMergeHeroIntoPostList(current, next)) {
+      merged.push(mergeHeroIntoPostList(current, next, node));
+      index += 1;
+      continue;
+    }
+
     merged.push(current);
   }
 
@@ -2549,6 +2669,52 @@ function mergeHeroIntoCardGrid(
       customClassNames.length > 0 ? customClassNames : undefined,
     background: grid.background ?? hero.background,
     textColor: grid.textColor ?? hero.textColor,
+  };
+}
+
+function canMergeHeroIntoPostList(
+  current: HeroSection,
+  next: SectionPlan | undefined,
+): next is PostListSection {
+  if (!next || next.type !== 'post-list') {
+    return false;
+  }
+
+  return (
+    !current.image &&
+    !current.cta &&
+    (!current.ctas || current.ctas.length === 0) &&
+    !!current.heading
+  );
+}
+
+function mergeHeroIntoPostList(
+  hero: HeroSection,
+  postList: PostListSection,
+  node: WpNode,
+): PostListSection {
+  const mergedCustomClassNames = uniqueClassNames([
+    ...(postList.customClassNames ?? []),
+    ...(hero.customClassNames ?? []),
+  ]);
+
+  return {
+    ...postList,
+    title: hero.heading || postList.title,
+    ...(postList.titleCustomClassNames?.length
+      ? {}
+      : hero.headingCustomClassNames?.length
+        ? {
+            titleCustomClassNames: uniqueClassNames(
+              hero.headingCustomClassNames,
+            ),
+          }
+        : {}),
+    sourceRef: node.sourceRef ?? postList.sourceRef,
+    customClassNames:
+      mergedCustomClassNames.length > 0 ? mergedCustomClassNames : undefined,
+    background: postList.background ?? hero.background,
+    textColor: postList.textColor ?? hero.textColor,
   };
 }
 
@@ -3117,33 +3283,38 @@ function buildCardGridCardFromGroup(node: WpNode): {
   customClassNames?: string[];
   imageCustomClassNames?: string[];
 } | null {
-  const testimonial = buildTestimonialFromGroup(node, node.children ?? []);
-  if (testimonial) {
-    return {
-      heading:
-        testimonial.authorName || testimonial.authorTitle || 'Testimonial',
-      body: testimonial.quote,
-      ...(testimonial.authorAvatar
-        ? {
-            imageSrc: testimonial.authorAvatar,
-            imageAlt: testimonial.authorName || '',
-          }
-        : {}),
-      ...(testimonial.authorCustomClassNames?.length
-        ? { headingCustomClassNames: testimonial.authorCustomClassNames }
-        : {}),
-      ...(testimonial.quoteCustomClassNames?.length
-        ? { bodyCustomClassNames: testimonial.quoteCustomClassNames }
-        : {}),
-      ...(node.customClassNames?.length
-        ? { customClassNames: uniqueClassNames(node.customClassNames) }
-        : {}),
-      ...(testimonial.authorAvatarCustomClassNames?.length
-        ? {
-            imageCustomClassNames: testimonial.authorAvatarCustomClassNames,
-          }
-        : {}),
-    };
+  // Guard: only treat as testimonial card if the group structure signals it.
+  // Cards with a heading block (project/service cards) fail this check, preventing
+  // them from being misclassified and producing the "Testimonial" fallback heading.
+  if (isLikelyTestimonialGroup(node)) {
+    const testimonial = buildTestimonialFromGroup(node, node.children ?? []);
+    if (testimonial) {
+      return {
+        heading:
+          testimonial.authorName || testimonial.authorTitle || 'Testimonial',
+        body: testimonial.quote,
+        ...(testimonial.authorAvatar
+          ? {
+              imageSrc: testimonial.authorAvatar,
+              imageAlt: testimonial.authorName || '',
+            }
+          : {}),
+        ...(testimonial.authorCustomClassNames?.length
+          ? { headingCustomClassNames: testimonial.authorCustomClassNames }
+          : {}),
+        ...(testimonial.quoteCustomClassNames?.length
+          ? { bodyCustomClassNames: testimonial.quoteCustomClassNames }
+          : {}),
+        ...(node.customClassNames?.length
+          ? { customClassNames: uniqueClassNames(node.customClassNames) }
+          : {}),
+        ...(testimonial.authorAvatarCustomClassNames?.length
+          ? {
+              imageCustomClassNames: testimonial.authorAvatarCustomClassNames,
+            }
+          : {}),
+      };
+    }
   }
 
   const flat = flattenChildren(node);
@@ -3151,7 +3322,14 @@ function buildCardGridCardFromGroup(node: WpNode): {
   const paragraphNodes = flat.filter((candidate) =>
     ['core/paragraph', 'paragraph'].includes(candidate.block),
   );
-  const imageNode = findFirstByBlock(flat, ['core/image', 'image']);
+  // Prefer wp:cover background image over nested wp:image blocks (e.g. icon badges
+  // inside a cover). The cover's src is the semantic card image; a wp:image inside
+  // the cover is typically a decorative overlay element.
+  const coverNode = flat.find(
+    (c) => (c.block === 'core/cover' || c.block === 'cover') && c.src,
+  );
+  const imageNode =
+    coverNode ?? findFirstByBlock(flat, ['core/image', 'image']);
 
   const headingText = headingNode ? extractNodeText(headingNode) : '';
   const primaryParagraph = paragraphNodes.find((candidate) =>
@@ -3357,12 +3535,7 @@ function isMediaTextGroup(children: WpNode[]): boolean {
     (c) => c.block === 'core/column' || c.block === 'column',
   );
   if (cols.length !== 2) return false;
-  const flat0 = flattenChildren(cols[0]);
-  const flat1 = flattenChildren(cols[1]);
-  const hasImg =
-    flat0.some((c) => c.block === 'core/image' || c.block === 'image') ||
-    flat1.some((c) => c.block === 'core/image' || c.block === 'image');
-  return hasImg;
+  return isStrictMediaTextColumns(cols);
 }
 
 function buildMediaTextFromColumns(
@@ -3371,12 +3544,12 @@ function buildMediaTextFromColumns(
   const flat0 = flattenChildren(cols[0]);
   const flat1 = cols[1] ? flattenChildren(cols[1]) : [];
 
-  const imgInFirst = flat0.find(
-    (c) => c.block === 'core/image' || c.block === 'image',
-  );
-  const imgInSecond = flat1.find(
-    (c) => c.block === 'core/image' || c.block === 'image',
-  );
+  const isColumnImgNode = (c: WpNode) =>
+    c.block === 'core/image' ||
+    c.block === 'image' ||
+    ((c.block === 'core/cover' || c.block === 'cover') && !!c.src);
+  const imgInFirst = flat0.find(isColumnImgNode);
+  const imgInSecond = flat1.find(isColumnImgNode);
 
   const imgNode = imgInFirst ?? imgInSecond;
   if (!imgNode?.src) {

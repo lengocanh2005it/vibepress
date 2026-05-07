@@ -28,4 +28,10 @@ describe('runtime-plan-builder template source', () => {
     );
     expect(source).toContain('result.columns = layout.columnCount');
   });
+
+  it('exports resolved runtime page markup so the API can return render-ready content', () => {
+    expect(source).toContain('export function resolveRuntimePageMarkupFromRow');
+    expect(source).toContain('expandTemplateMarkup');
+    expect(source).toContain('<!--\\s*wp:post-content');
+  });
 });

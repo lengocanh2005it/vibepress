@@ -43,6 +43,13 @@ import {
   type ComponentRenderContract,
 } from '../planner/render-contract.schema.js';
 import type { PlannerSurfacePlan } from '../planner/planner-surface-plan.schema.js';
+import { shouldPreferThemeSourceFaithfulDeterministicPage } from './source-faithful-deterministic.util.js';
+import {
+  shouldForceStrictThemeSourceFaithfulDeterministicPage,
+  shouldPreferSectionAssemblyForFrontPage,
+  shouldRegenerateThemeSourceFaithfulDeterministicPage,
+} from './source-faithful-deterministic.util.js';
+import { synchronizeVisualPlanContract } from '../shared/visual-data-needs.util.js';
 
 // Classic templates can stay on the normal single-component path up to this size.
 const CLASSIC_CHUNK_THRESHOLD_CHARS = 40_000;
@@ -389,7 +396,7 @@ export class ReactGeneratorService {
         this.attachPlanContext(
           { name: componentName, filePath: '', code },
           componentPlan,
-          { generationMode: 'deterministic' },
+          { generationMode: 'ai' },
         ),
       ];
     }
@@ -420,6 +427,59 @@ export class ReactGeneratorService {
       templateNodes && !isHeaderOrFooterPartial
         ? templateNodes.filter((node) => !isSharedLayoutBlock(node))
         : templateNodes;
+    const requiredCustomClassNames = this.collectCustomClassNamesFromNodes(
+      filteredNodes ?? [],
+    );
+    const nodeTargets = this.collectCustomClassTargetsFromNodes(
+      filteredNodes ?? [],
+    );
+    const requiredCustomClassTargets = this.resolveRequiredCustomClassTargets(
+      requiredCustomClassNames,
+      tokens,
+      nodeTargets,
+    );
+
+    const prefersStrictThemeSourceFaithfulDeterministicPage =
+      shouldForceStrictThemeSourceFaithfulDeterministicPage({
+        componentPlan,
+        componentName,
+      });
+    if (
+      prefersStrictThemeSourceFaithfulDeterministicPage ||
+      shouldPreferThemeSourceFaithfulDeterministicPage({
+        componentPlan,
+        componentName,
+        repoManifest,
+      })
+    ) {
+      const deterministicPlan = componentPlan;
+      if (!deterministicPlan?.visualPlan) {
+        throw new Error(
+          `Missing visual plan for source-faithful deterministic page "${componentName}"`,
+        );
+      }
+      const code = this.codeGenerator.generate({
+        ...deterministicPlan.visualPlan,
+        runtimeRenderer: deterministicPlan.runtimeRenderer,
+      });
+      await this.logToFile(
+        logPath,
+        prefersStrictThemeSourceFaithfulDeterministicPage
+          ? `[theme-source-faithful] "${componentName}": generated strict deterministic full-file code from canonical block-tree plan`
+          : `[theme-source-faithful] "${componentName}": generated deterministic full-file code from reviewed visual plan`,
+      );
+      return [
+        this.attachPlanContext(
+          { name: componentName, filePath: '', code },
+          deterministicPlan,
+          {
+            generationMode: 'deterministic',
+            requiredCustomClassNames,
+            requiredCustomClassTargets,
+          },
+        ),
+      ];
+    }
 
     if (
       this.shouldUseBlockFaithfulSharedPartial(
@@ -432,17 +492,6 @@ export class ReactGeneratorService {
         componentName,
         componentPlan,
         filteredNodes ?? [],
-      );
-      const requiredCustomClassNames = this.collectCustomClassNamesFromNodes(
-        filteredNodes ?? [],
-      );
-      const nodeTargets = this.collectCustomClassTargetsFromNodes(
-        filteredNodes ?? [],
-      );
-      const requiredCustomClassTargets = this.resolveRequiredCustomClassTargets(
-        requiredCustomClassNames,
-        tokens,
-        nodeTargets,
       );
       const code = this.codeGenerator.generateBlockFaithfulPartial({
         componentName,
@@ -691,16 +740,54 @@ export class ReactGeneratorService {
     const fixAgentModel = modelConfig?.fixAgent ?? this.llmFactory.getModel();
     const effectiveRenderContract =
       component.renderContract ?? componentPlan?.renderContract;
+    const isStrictSourceFaithfulProtection =
+      shouldRegenerateThemeSourceFaithfulDeterministicPage({
+        componentPlan,
+        componentName: component.name,
+      });
+    const prefersFrontPageSectionAssembly =
+      shouldPreferSectionAssemblyForFrontPage({
+        componentPlan,
+        componentName: component.name,
+      });
     const isProtectedDeterministicAuthority =
+      !prefersFrontPageSectionAssembly &&
       component.generationMode === 'deterministic' &&
       shouldBypassAiGenerationForVisualPlan(component.visualPlan);
     const isStrictRenderContractProtection =
+      isStrictSourceFaithfulProtection &&
       shouldBlockAiStructuralRewriteForRenderContract(effectiveRenderContract);
 
     if (
       (isProtectedDeterministicAuthority || isStrictRenderContractProtection) &&
       fixMode !== 'syntax-only'
     ) {
+      if (fixMode === 'full' && isStrictSourceFaithfulProtection) {
+        const hasSharedHeader = !!plan.some(
+          (item) =>
+            item.type === 'partial' && /^header/i.test(item.componentName),
+        );
+        const hasSharedFooter = !!plan.some(
+          (item) =>
+            item.type === 'partial' && /^footer/i.test(item.componentName),
+        );
+        const regenerated = this.generateDeterministicFallbackComponent({
+          component,
+          plan,
+          hasSharedHeader,
+          hasSharedFooter,
+        });
+        if (regenerated) {
+          this.logger.log(
+            `[fixer] Rebuilt protected source-faithful component "${component.name}" from its canonical deterministic plan`,
+          );
+          await this.logToFile(
+            logPath,
+            `[fixer] Rebuilt protected source-faithful component "${component.name}" from its canonical deterministic plan. Feedback: ${feedback}`,
+          );
+          return regenerated;
+        }
+      }
       this.logger.log(
         `[fixer] Skipping AI auto-fix for protected component "${component.name}" to preserve planner-owned/source-backed structure`,
       );
@@ -803,14 +890,20 @@ export class ReactGeneratorService {
       return null;
     }
 
-    const code = this.codeGenerator.generate({
-      ...effectivePlan.visualPlan,
-      runtimeRenderer: effectivePlan.runtimeRenderer,
-    });
+    const synchronizedVisualPlan = synchronizeVisualPlanContract(
+      effectivePlan.visualPlan,
+      effectivePlan,
+    );
+    if (!synchronizedVisualPlan) {
+      return null;
+    }
+
+    const code = this.codeGenerator.generate(synchronizedVisualPlan);
     return this.attachPlanContext(
       {
         ...component,
         code,
+        visualPlan: synchronizedVisualPlan,
       },
       effectivePlan,
       {
@@ -889,6 +982,10 @@ ${renders}
     componentPlan?: PlanResult[number],
     overrides?: Partial<GeneratedComponent>,
   ): GeneratedComponent {
+    const resolvedVisualPlan = synchronizeVisualPlanContract(
+      component.visualPlan ?? componentPlan?.visualPlan,
+      componentPlan,
+    );
     return {
       ...component,
       route: componentPlan?.route ?? component.route,
@@ -900,7 +997,7 @@ ${renders}
         ? [...componentPlan.dataNeeds]
         : component.dataNeeds,
       type: componentPlan?.type ?? component.type,
-      visualPlan: component.visualPlan ?? componentPlan?.visualPlan,
+      visualPlan: resolvedVisualPlan,
       surfacePlan: component.surfacePlan ?? componentPlan?.surfacePlan,
       renderContract: component.renderContract ?? componentPlan?.renderContract,
       ...overrides,
@@ -1597,22 +1694,34 @@ ${renders}
     nodes: WpNode[],
   ): string[] {
     const needs = new Set(componentPlan?.dataNeeds ?? []);
+    let hasSiteInfoEvidence = false;
+    let hasFooterLinkEvidence = false;
     const visit = (node: WpNode) => {
       const block = node.block.replace(/^core\//, '');
       if (['site-title', 'site-tagline', 'site-logo'].includes(block)) {
+        hasSiteInfoEvidence = true;
         needs.add('siteInfo');
       }
       if (block === 'navigation') {
-        if (!/^footer/i.test(componentName)) needs.add('menus');
+        if (/^footer/i.test(componentName)) hasFooterLinkEvidence = true;
+        else needs.add('menus');
+      }
+      if (
+        /^footer/i.test(componentName) &&
+        ['page-list', 'pages', 'latest-posts'].includes(block)
+      ) {
+        hasFooterLinkEvidence = true;
       }
       for (const child of node.children ?? []) visit(child);
     };
     for (const node of nodes) visit(node);
-    if (/^(header|footer)/i.test(componentName)) {
+    if (/^header/i.test(componentName) || hasSiteInfoEvidence) {
       needs.add('siteInfo');
     }
     if (/^footer/i.test(componentName)) {
-      needs.add('footerLinks');
+      if (hasFooterLinkEvidence) needs.add('footerLinks');
+      else needs.delete('footerLinks');
+      if (!hasSiteInfoEvidence) needs.delete('siteInfo');
       needs.delete('menus');
     }
     return Array.from(needs);

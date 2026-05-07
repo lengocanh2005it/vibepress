@@ -750,6 +750,14 @@ export class ValidatorService {
         context.componentName ?? '',
       );
       const isFooterPartial = /^Footer$/i.test(context.componentName ?? '');
+      const footerRequiresFooterLinks =
+        isFooterPartial &&
+        (dataNeeds.has('footerLinks') ||
+          (context.visualPlan?.sections ?? []).some(
+            (section) =>
+              section.type === 'footer' &&
+              (section.menuColumns?.length ?? 0) > 0,
+          ));
       const usesSiteTitle =
         /\bsiteInfo\??\.siteName\b/.test(code) ||
         /\{siteInfo\??\.siteName\}/.test(code);
@@ -806,7 +814,7 @@ export class ValidatorService {
         );
       }
       if (
-        isFooterPartial &&
+        footerRequiresFooterLinks &&
         !/fetch\(\s*['"`]\/api\/footer-links\b/.test(code)
       ) {
         violations.push(
@@ -814,7 +822,7 @@ export class ValidatorService {
         );
       }
       if (
-        isFooterPartial &&
+        footerRequiresFooterLinks &&
         /\b(staticSections|fallbackSections|defaultFooterColumns)\b/.test(code)
       ) {
         violations.push(
@@ -1033,17 +1041,9 @@ export class ValidatorService {
     }
 
     if (context.type === 'page' && /dangerouslySetInnerHTML/.test(code)) {
-      // post-content sections are explicitly allowed to render post body HTML via
-      // dangerouslySetInnerHTML — the validator's post-content field check accepts
-      // exactly that pattern. Only block it for pages that have no post-content section.
-      const hasPostContentSection = context.visualPlan?.sections?.some(
-        (s) => s.type === 'post-content',
+      violations.push(
+        'Page/detail components must not use `dangerouslySetInnerHTML`. Preserve rich text through explicit semantic JSX wrappers such as `<p>`, `<div>`, `<h*>`, or `<li>` plus `renderRichTextChildren(...)` instead.',
       );
-      if (!hasPostContentSection) {
-        violations.push(
-          'Page components must not use `dangerouslySetInnerHTML`. Render page/body rich text through structured JSX or the rich-text node helper instead.',
-        );
-      }
     }
 
     // 13. <img> without alt attribute — accessibility + common AI mistake
@@ -1365,6 +1365,12 @@ export class ValidatorService {
   ): string | null {
     if (!renderContract) return null;
     if (renderContract.structure.renderMode === 'fallback-section') return null;
+    if (
+      visualPlan?.renderMode === 'section-centric' &&
+      visualPlan.renderAuthority === 'ai'
+    ) {
+      return null;
+    }
 
     const label =
       componentName ??
@@ -2279,7 +2285,7 @@ export class ValidatorService {
     const fields: Array<{ name: string; message: string }> = [
       {
         name: 'content',
-        message: `${label} post-content must render post body HTML`,
+        message: `${label} post-content must render post body through the approved structured rich-text render path`,
       },
     ];
     if (section.showTitle) {
@@ -3150,12 +3156,11 @@ export class ValidatorService {
         ]);
       case 'post-content':
         return this.codeMatchesAnyPattern(code, [
-          /dangerouslySetInnerHTML=\{\{\s*__html:\s*[A-Za-z_$][\w$]*\.content\s*\}\}/,
-          /\b[A-Za-z_$][\w$]*\.(?:content|title|date|author(?:Name)?|categories?|categorySlugs?|featuredImage|tags)\b/,
+          /renderRichTextChildren\(\s*[A-Za-z_$][\w$]*\.content\s*,/i,
+          /\b[A-Za-z_$][\w$]*(?:\??\.)+(?:content|title|date|author(?:Name)?|categories?|categorySlugs?|featuredImage|tags)\b/,
         ]);
       case 'page-content':
         return this.codeMatchesAnyPattern(code, [
-          /dangerouslySetInnerHTML=\{\{\s*__html:\s*[A-Za-z_$][\w$]*\.content\s*\}\}/,
           /renderRichTextChildren\(\s*[A-Za-z_$][\w$]*\.content\s*,/i,
           /\b[A-Za-z_$][\w$]*\.(?:content|title)\b/,
         ]);
@@ -3190,12 +3195,14 @@ export class ValidatorService {
             );
           case 'categories':
             return (
-              /\b(?:post|item|previousPost|nextPost)\.(?:categories|category|categorySlugs?)\b/i.test(
+              /\b(?:metaSource|post|item|previousPost|nextPost)\.(?:categories|category|categorySlugs?)\b/i.test(
                 code,
               ) || this.codeUsesDerivedCategoryCollection(code)
             );
           case 'tags':
-            return /\b(?:post|item|previousPost|nextPost)\.tags\b/i.test(code);
+            return /\b(?:metaSource|post|item|previousPost|nextPost)\.tags\b/i.test(
+              code,
+            );
           case 'featuredImage':
             return /\b(?:post|item|previousPost|nextPost)\.(?:featuredImage|image|thumbnail)\b|<img\b/i.test(
               code,
@@ -3234,12 +3241,12 @@ export class ValidatorService {
             return /\b(?:product|post|item)\.date\b|<time\b/i.test(code);
           case 'categories':
             return (
-              /\b(?:product|post|item)\.(?:categories|category|categorySlugs?)\b/i.test(
+              /\b(?:metaSource|product|post|item)\.(?:categories|category|categorySlugs?)\b/i.test(
                 code,
               ) || this.codeUsesDerivedCategoryCollection(code)
             );
           case 'tags':
-            return /\b(?:product|post|item)\.tags\b/i.test(code);
+            return /\b(?:metaSource|product|post|item)\.tags\b/i.test(code);
           case 'featuredImage':
             return /\b(?:product|post|item)\.(?:featuredImage|image|thumbnail)\b|<img\b/i.test(
               code,
@@ -3309,30 +3316,25 @@ export class ValidatorService {
       case 'post-content':
         switch (field) {
           case 'title':
-            return /\b[A-Za-z_$][\w$]*\.title\b/.test(code);
+            return /\b[A-Za-z_$][\w$]*(?:\??\.)+title\b/.test(code);
           case 'content':
-            return (
-              /dangerouslySetInnerHTML=\{\{\s*__html:\s*[A-Za-z_$][\w$]*\.content\s*\}\}/.test(
-                code,
-              ) ||
-              /renderRichTextChildren\(\s*[A-Za-z_$][\w$]*\.content\s*,/i.test(
-                code,
-              )
+            return /renderRichTextChildren\(\s*[A-Za-z_$][\w$]*(?:\??\.)+content\s*,/i.test(
+              code,
             );
           case 'slug':
-            return /\b[A-Za-z_$][\w$]*\.slug\b/.test(code);
+            return /\b[A-Za-z_$][\w$]*(?:\??\.)+slug\b/.test(code);
           case 'author':
-            return /\b[A-Za-z_$][\w$]*\.author(?:Name)?\b/i.test(code);
+            return /\b[A-Za-z_$][\w$]*(?:\??\.)+author(?:Name)?\b/i.test(code);
           case 'date':
-            return /\b[A-Za-z_$][\w$]*\.date\b|<time\b/i.test(code);
+            return /\b[A-Za-z_$][\w$]*(?:\??\.)+date\b|<time\b/i.test(code);
           case 'categories':
-            return /\b[A-Za-z_$][\w$]*\.(?:categories|category|categorySlugs?)\b/i.test(
+            return /\b[A-Za-z_$][\w$]*(?:\??\.)+(?:categories|category|categorySlugs?)\b/i.test(
               code,
             );
           case 'featuredImage':
-            return /\b[A-Za-z_$][\w$]*\.featuredImage\b|<img\b/i.test(code);
+            return /\b[A-Za-z_$][\w$]*(?:\??\.)+featuredImage\b|<img\b/i.test(code);
           case 'tags':
-            return /\b[A-Za-z_$][\w$]*\.tags\b/i.test(code);
+            return /\b[A-Za-z_$][\w$]*(?:\??\.)+tags\b/i.test(code);
           default:
             return true;
         }
@@ -3341,13 +3343,8 @@ export class ValidatorService {
           case 'title':
             return /\b[A-Za-z_$][\w$]*\.title\b/.test(code);
           case 'content':
-            return (
-              /dangerouslySetInnerHTML=\{\{\s*__html:\s*[A-Za-z_$][\w$]*\.content\s*\}\}/.test(
-                code,
-              ) ||
-              /renderRichTextChildren\(\s*[A-Za-z_$][\w$]*\.content\s*,/i.test(
-                code,
-              )
+            return /renderRichTextChildren\(\s*[A-Za-z_$][\w$]*\.content\s*,/i.test(
+              code,
             );
           default:
             return true;
@@ -3677,12 +3674,15 @@ mustKeep=${mustKeep}
     if (normalizedCode.includes(normalizedLiteral)) return true;
     if (this.codeContainsEquivalentAssetLiteral(code, literal)) return true;
 
-    const paragraphParts = normalizedLiteral
-      .split(/\n\s*\n/)
+    // Split the ORIGINAL literal on newlines before normalization, because
+    // normalizeLiteralSearchText collapses all whitespace — splitting after
+    // normalization would never find multi-line boundaries.
+    const rawLineParts = literal
+      .split(/\n\s*\n|\n/)
       .map((part) => this.normalizeLiteralSearchText(part))
-      .filter(Boolean);
-    if (paragraphParts.length > 1) {
-      return paragraphParts.every((part) => normalizedCode.includes(part));
+      .filter((part) => part.length >= 4);
+    if (rawLineParts.length > 1) {
+      return rawLineParts.every((part) => normalizedCode.includes(part));
     }
 
     return false;

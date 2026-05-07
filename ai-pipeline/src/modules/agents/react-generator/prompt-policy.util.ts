@@ -2,13 +2,16 @@ import type { ComponentVisualPlan, SectionPlan } from './visual-plan.schema.js';
 import { toVisualDataNeeds } from '../shared/visual-data-needs.util.js';
 
 export const PAGE_COMPONENT_RICH_TEXT_RULE =
-  '- `post.content` is normalized HTML and may use `dangerouslySetInnerHTML` when the approved section/render path calls for raw post HTML. `page.content` is also normalized HTML, but page components should render it through `renderRichTextChildren` or equivalent structured JSX instead of `dangerouslySetInnerHTML`.';
+  '- `post.content` and `page.content` are normalized HTML, but page/detail components should render them through `renderRichTextChildren` or equivalent structured JSX instead of `dangerouslySetInnerHTML`.';
 
 export const FIXED_PAGE_DETAIL_EXACT_FETCH_RULE =
   '- Fixed page-detail rule: fetch the exact page record for the approved slug. If the approved visual plan keeps the page as one `page-content` body wrapper, preserve that wrapper. If the approved visual plan already decomposes the source-backed page into rich sections such as `cover`, `media-text`, `card-grid`, `tabs`, `accordion`, `carousel`, or `modal`, render those approved sections directly instead of collapsing everything back into one narrow prose wrapper.';
 
 export const FIXED_PAGE_DETAIL_NO_DSIH_RULE =
   '- Page components must NOT use `dangerouslySetInnerHTML`. Convert approved page HTML/rich text into structured JSX nodes instead of dumping raw HTML strings.';
+
+export const STRUCTURED_RICH_TEXT_WRAPPER_RULE =
+  '- When preserving inline markup from approved rich-text fields, wrap it in explicit semantic JSX tags such as `<p>`, `<div>`, `<h2>`, or `<li>` and render child markup through `renderRichTextChildren(...)`. Do NOT dump HTML strings directly.';
 
 export const FIXED_PAGE_DETAIL_NARROW_SHELL_RULE =
   '- Do NOT redesign a fixed page-detail into a centered feature article shell with classes such as `max-w-[620px]`, `max-w-2xl`, `max-w-3xl`, or broad `mx-auto` wrappers unless that exact narrow shell is clearly source-backed in the approved layout.';
@@ -72,6 +75,7 @@ export function buildFixedPageDetailPromptLines(): string[] {
   return [
     FIXED_PAGE_DETAIL_EXACT_FETCH_RULE,
     FIXED_PAGE_DETAIL_NO_DSIH_RULE,
+    STRUCTURED_RICH_TEXT_WRAPPER_RULE,
     FIXED_PAGE_DETAIL_NARROW_SHELL_RULE,
     FIXED_PAGE_DETAIL_LAYOUT_PRESERVE_RULE,
     HYBRID_DETAIL_NO_CANONICAL_BODY_RULE,
@@ -104,7 +108,7 @@ export function buildClassicDetailContentHint(input: {
   isPage: boolean;
 }): string {
   if (input.isSingle) {
-    return '- `{/* WP: post.content (HTML) */}` -> render `post?.content` with `dangerouslySetInnerHTML={{ __html: post?.content ?? "" }}` (NO fetch array)';
+    return '- `{/* WP: post.content (HTML) */}` -> render `post?.content` through `renderRichTextChildren(post?.content ?? "", "post-content")` or equivalent structured JSX post-content renderer (NO fetch array)';
   }
   if (input.isPage) {
     return '- `{/* WP: post.content (HTML) */}` -> render `page?.content` through `renderRichTextChildren(page?.content ?? "", "page-content")` or equivalent structured JSX page-content renderer (NO fetch array)';

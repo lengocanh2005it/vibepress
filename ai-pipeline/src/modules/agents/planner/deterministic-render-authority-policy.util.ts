@@ -25,12 +25,18 @@ const PIXEL_SUPPORTED_BLOCK_KINDS = new Set<string>([
   'buttons',
   'button',
   'image',
+  'cover',
+  'media-text',
+  'details',
   'search',
   'social-links',
   'social-link',
   'avatar',
   'post-author-biography',
+  'post-content',
+  'post-featured-image',
   'categories',
+  'tag-cloud',
   'latest-posts',
   'query',
   'post-date',
@@ -44,6 +50,7 @@ export function assessDeterministicRenderAuthority(input: {
   componentPlan: BlockTreePlannerComponentPlan;
   draftBlockTree: BlockNode[];
   draftSections?: SectionPlan[];
+  canUseCanonicalBlockTreePageRenderer?: boolean;
 }): DeterministicRenderAuthorityAssessment {
   const unsupportedBlockKinds = collectUnsupportedPixelBlockKinds(
     input.draftBlockTree,
@@ -56,6 +63,18 @@ export function assessDeterministicRenderAuthority(input: {
     return {
       renderAuthority: 'deterministic-pixel',
       reason: `Planner resolved ${input.componentPlan.componentName} from a fully supported WordPress shared-partial block tree; downstream must replay the layout/styling exactly and never hand structure back to AI.`,
+      unsupportedBlockKinds,
+    };
+  }
+
+  if (
+    input.componentPlan.type === 'page' &&
+    input.canUseCanonicalBlockTreePageRenderer &&
+    unsupportedBlockKinds.length === 0
+  ) {
+    return {
+      renderAuthority: 'deterministic-pixel',
+      reason: `Planner resolved ${input.componentPlan.componentName} from a fully supported WordPress page block tree; downstream must render the canonical block tree directly and keep section fallback as compatibility-only metadata.`,
       unsupportedBlockKinds,
     };
   }

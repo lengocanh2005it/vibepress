@@ -1251,7 +1251,7 @@ function buildRuntimeTemplateCandidates(row: any): string[] {
   return [...candidates];
 }
 
-function resolvePageTemplate(row: any): string {
+export function resolveRuntimePageMarkupFromRow(row: any): string {
   const themeDir = process.env.THEME_DIR?.trim();
   const postContent = String(row.post_content ?? '');
   if (!themeDir) return postContent;
@@ -1278,7 +1278,7 @@ export function buildRuntimePlanFromPageRow(row: any) {
   const resolvedTemplate =
     normalizedTemplate ||
     (Number(row?.is_front_page ?? 0) === 1 ? 'front-page' : 'default');
-  const markup = resolvePageTemplate(row);
+  const markup = resolveRuntimePageMarkupFromRow(row);
   const blocks = parseRuntimeBlocks(markup);
   const blockTree = blocks.map((block, index) =>
     buildRuntimeBlockNode(block, `root.${index + 1}`),

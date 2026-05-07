@@ -64,6 +64,232 @@ describe('CodeGeneratorService', () => {
     expect(code).toContain('backgroundImage: `url("${resolveAsset(');
   });
 
+  it('unwraps paragraph block html before rendering inside paragraph wrappers', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'RuntimeLikePage',
+      renderMode: 'hybrid',
+      sections: [],
+      blockTree: [
+        {
+          kind: 'paragraph',
+          html: '<p><strong>About</strong> content</p>',
+          sourceRef: { sourceNodeId: 'page::paragraph::1' },
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain(
+      'renderRichTextChildren("<strong>About</strong> content", "page::paragraph::1")',
+    );
+    expect(code).not.toContain(
+      'renderRichTextChildren("<p><strong>About</strong> content</p>"',
+    );
+  });
+
+  it('falls back to block-tree rendering when deterministic partial sections are empty', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'Sidebar',
+      dataNeeds: ['posts'],
+      renderMode: 'block-centric',
+      sections: [],
+      blockTree: [
+        {
+          kind: 'group',
+          children: [
+            {
+              kind: 'search',
+              sourceRef: { sourceNodeId: 'sidebar::search::0.0.0' },
+            },
+            {
+              kind: 'heading',
+              text: 'Latest Posts',
+              level: 4,
+            },
+            {
+              kind: 'latest-posts',
+              sourceRef: { sourceNodeId: 'sidebar::latest-posts::0.1.1' },
+            },
+          ],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain('<form role="search"');
+    expect(code).toContain('Latest Posts');
+    expect(code).toContain('posts.slice(0, 5)');
+  });
+
+  it('preserves source search descendants instead of collapsing wrapper sections in hybrid output', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'Error404',
+      renderMode: 'hybrid',
+      sections: [
+        {
+          type: 'card-grid',
+          columns: 1,
+          cards: [
+            { heading: '404: Page Not Disco-vered', body: 'Missing page.' },
+          ],
+          sourceRef: { sourceNodeId: '404::group::0' },
+        },
+      ],
+      blockTree: [
+        {
+          kind: 'group',
+          sourceRef: { sourceNodeId: '404::group::0' },
+          children: [
+            { kind: 'heading', text: '404: Page Not Disco-vered', level: 2 },
+            { kind: 'paragraph', text: 'Missing page.' },
+            {
+              kind: 'search',
+              sourceRef: { sourceNodeId: '404::search::0.0.0.0.2' },
+            },
+            { kind: 'button', text: 'Go to home page', href: '/' },
+          ],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain('<form role="search"');
+    expect(code).toContain('Go to home page');
+  });
+
+  it('preserves source-backed card-grid descendants instead of collapsing rich project grids in hybrid output', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'TemplateAbout',
+      renderMode: 'hybrid',
+      sections: [
+        {
+          type: 'card-grid',
+          title: 'Some Of My Projects',
+          subtitle: 'My Projects',
+          columns: 4,
+          cards: [
+            {
+              heading: 'Testimonial',
+              body: 'Fallback card body',
+              imageSrc: 'theme-asset:/assets/images/arrow-up.png',
+            },
+          ],
+          sourceRef: { sourceNodeId: 'template-about::group::0' },
+        },
+      ],
+      blockTree: [
+        {
+          kind: 'group',
+          sourceRef: { sourceNodeId: 'template-about::group::0' },
+          children: [
+            {
+              kind: 'heading',
+              text: 'Some Of My Projects',
+              level: 2,
+              sourceRef: { sourceNodeId: 'template-about::heading::0.0' },
+            },
+            {
+              kind: 'group',
+              sourceRef: { sourceNodeId: 'template-about::group::0.1' },
+              children: [
+                {
+                  kind: 'cover',
+                  src: 'theme-asset:/assets/images/projects-2.jpg',
+                  sourceRef: { sourceNodeId: 'template-about::cover::0.1.0' },
+                  children: [],
+                },
+                {
+                  kind: 'heading',
+                  text: 'AI Based Social Networks',
+                  level: 3,
+                  sourceRef: { sourceNodeId: 'template-about::heading::0.1.1' },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain(
+      'resolveAsset("theme-asset:/assets/images/projects-2.jpg")',
+    );
+    expect(code).toContain('AI Based Social Networks');
+  });
+
+  it('renders tag bindings for inferred trailing block-tree post-terms nodes', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'SingleProduct',
+      dataNeeds: ['productDetail'],
+      renderMode: 'hybrid',
+      sections: [],
+      blockTree: [
+        {
+          kind: 'post-terms',
+          sourceRef: {
+            sourceNodeId: 'single-product::post-terms::1.1.0.1.5.0.2',
+          },
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain('item?.tags');
+    expect(code).not.toContain('className="post-content"{styleAttr}');
+    expect(code).not.toContain('className="post-excerpt"{styleAttr}');
+  });
+
+  it('uses planned post-terms taxonomy for block-centric post-terms nodes', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'SingleProduct',
+      dataNeeds: ['productDetail'],
+      renderMode: 'block-centric',
+      sections: [
+        {
+          type: 'post-content',
+          showTitle: false,
+          showAuthor: false,
+          showDate: false,
+          showCategories: false,
+        },
+        {
+          type: 'post-terms',
+          taxonomy: 'post_tag',
+          layout: 'inline',
+          debugKey: 'post-terms-0',
+          sourceRef: {
+            sourceNodeId: 'single-product::post-terms::0',
+          },
+        },
+      ],
+      blockTree: [
+        {
+          kind: 'post-terms',
+          sourceRef: {
+            sourceNodeId: 'single-product::post-terms::0',
+          },
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain('item?.tags');
+    expect(code).not.toContain('item?.categories');
+  });
+
   it('renders CTA text for search sections', () => {
     const plan = {
       ...basePlan,
@@ -84,6 +310,33 @@ describe('CodeGeneratorService', () => {
 
     expect(code).toContain('Go to home page');
     expect(code).toContain('<form role="search"');
+  });
+
+  it('does not infer pageDetail from non-detail transactional prose blocks', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'Cart',
+      dataNeeds: ['products'],
+      sections: [
+        {
+          type: 'prose-block',
+          shellVariant: 'wide',
+          sourceSegments: [
+            {
+              type: 'heading',
+              text: 'Your cart is currently empty!',
+              level: 2,
+            },
+          ],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).not.toContain('useParams');
+    expect(code).not.toContain('/api/pages/${slug}');
+    expect(code).toContain('/api/post-types/product/posts');
   });
 
   it('renders CTA text for card-grid sections', () => {
@@ -225,6 +478,123 @@ describe('CodeGeneratorService', () => {
     expect(code).toContain('post.featuredImage && <img');
   });
 
+  it('renders page content through structured rich-text nodes instead of dangerouslySetInnerHTML', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'SamplePage',
+      dataNeeds: ['page'],
+      sections: [
+        {
+          type: 'page-content',
+          showTitle: true,
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain(
+      '{renderRichTextChildren(item.content, "page-content")}',
+    );
+    expect(code).not.toContain(
+      'dangerouslySetInnerHTML={{ __html: item.content }}',
+    );
+  });
+
+  it('renders post content through structured rich-text nodes instead of dangerouslySetInnerHTML', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'Single',
+      dataNeeds: ['postDetail'],
+      sections: [
+        {
+          type: 'post-content',
+          showTitle: true,
+          showAuthor: true,
+          showDate: true,
+          showCategories: true,
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain(
+      '{renderRichTextChildren(item.content, "post-content")}',
+    );
+    expect(code).not.toContain(
+      'dangerouslySetInnerHTML={{ __html: item.content }}',
+    );
+  });
+
+  it('renders rich text sections through explicit JSX wrappers instead of dangerouslySetInnerHTML', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'TemplateServices',
+      sections: [
+        {
+          type: 'media-text',
+          subtitle: '<strong>About</strong> Me',
+          heading: 'Welcome <mark>Julia</mark>',
+          body: '<em>Structured</em> body copy',
+          listItems: ['<a href="/contact">Contact</a>'],
+        },
+        {
+          type: 'tabs',
+          tabs: [
+            {
+              label: 'Overview',
+              body: '<strong>Tabbed</strong> content',
+            },
+          ],
+        },
+        {
+          type: 'accordion',
+          items: [
+            {
+              title: 'FAQ',
+              body: '<em>Accordion</em> answer',
+            },
+          ],
+        },
+        {
+          type: 'modal',
+          triggerText: 'Open',
+          body: '<strong>Modal</strong> body',
+        },
+        {
+          type: 'prose-block',
+          sourceSegments: [
+            {
+              kind: 'paragraph',
+              html: '<strong>Paragraph</strong> text',
+            },
+            {
+              kind: 'html',
+              html: '<div><em>HTML</em> block</div>',
+            },
+          ],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain(
+      '{renderRichTextChildren("<strong>About</strong> Me", "media-text-subtitle")}',
+    );
+    expect(code).toContain(
+      '{renderRichTextChildren("<strong>Tabbed</strong> content",',
+    );
+    expect(code).toContain(
+      '{renderRichTextChildren("<em>Accordion</em> answer",',
+    );
+    expect(code).toContain(
+      '{renderRichTextChildren("<strong>Modal</strong> body", "modal-body")}',
+    );
+    expect(code).not.toContain('dangerouslySetInnerHTML');
+  });
+
   it('renders search widgets inside sidebar sections', () => {
     const plan = {
       ...basePlan,
@@ -247,8 +617,57 @@ describe('CodeGeneratorService', () => {
     const code = service.generate(plan);
 
     expect(code).toContain('<form role="search"');
+    expect(code).toContain('action="/search" method="get"');
+    expect(code).toContain('name="s"');
     expect(code).toContain('Search posts...');
     expect(code).toContain('>Find</button>');
+  });
+
+  it('wires search pages to query-backed post fetching', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'Search',
+      dataNeeds: ['posts'],
+      sections: [
+        {
+          type: 'search',
+          title: 'Search Results',
+          obligation: { required: ['posts'] },
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain(
+      "const searchTerm = searchParams.get('q') ?? searchParams.get('s') ?? '';",
+    );
+    expect(code).toContain('&search=${encodeURIComponent(searchTerm)}');
+    expect(code).toContain('}, [currentPage, searchTerm]);');
+  });
+
+  it('declares shared pagination state only once when posts and products are both needed', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'ArchiveProduct',
+      dataNeeds: ['posts', 'products'],
+      sections: [
+        {
+          type: 'post-list',
+          resource: 'products',
+          layout: 'grid-3',
+          maxItems: 9,
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code.match(/const \[searchParams, setSearchParams\]/g)).toHaveLength(
+      1,
+    );
+    expect(code.match(/const currentPage =/g)).toHaveLength(1);
+    expect(code.match(/const \[totalPages, setTotalPages\]/g)).toHaveLength(1);
   });
 
   it('renders tag widgets inside sidebar sections as archive links', () => {
@@ -274,6 +693,73 @@ describe('CodeGeneratorService', () => {
     expect(code).toContain("to={'/tag/' + slug}");
     expect(code).toContain("tag.toLowerCase().replace(/[^a-z0-9]+/g, '-')");
     expect(code).toContain('Tags');
+  });
+
+  it('renders block-centric sidebars from the preserved block tree instead of the semantic sidebar abstraction', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'Sidebar',
+      dataNeeds: ['posts'],
+      renderMode: 'block-centric',
+      sections: [
+        {
+          type: 'sidebar',
+          widgets: [
+            { kind: 'search' },
+            { kind: 'recent-posts', title: 'Latest Posts' },
+            { kind: 'categories', title: 'Categories' },
+            { kind: 'tags', title: 'Tags' },
+          ],
+        },
+      ],
+      blockTree: [
+        {
+          kind: 'group',
+          blockName: 'group',
+          customClassNames: ['sticky-sidebar'],
+          children: [
+            {
+              kind: 'group',
+              blockName: 'group',
+              children: [{ kind: 'search', blockName: 'search' }],
+            },
+            {
+              kind: 'group',
+              blockName: 'group',
+              children: [
+                { kind: 'heading', blockName: 'heading', text: 'Latest Posts' },
+                { kind: 'latest-posts', blockName: 'latest-posts' },
+              ],
+            },
+            {
+              kind: 'group',
+              blockName: 'group',
+              children: [
+                { kind: 'heading', blockName: 'heading', text: 'Categories' },
+                { kind: 'categories', blockName: 'categories' },
+              ],
+            },
+            {
+              kind: 'group',
+              blockName: 'group',
+              children: [
+                { kind: 'heading', blockName: 'heading', text: 'Tags' },
+                { kind: 'tag-cloud', blockName: 'tag-cloud' },
+              ],
+            },
+          ],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain('sticky-sidebar');
+    expect(code).toContain('<form role="search"');
+    expect(code).toContain('Latest Posts');
+    expect(code).toContain('Categories');
+    expect(code).toContain('Tags');
+    expect(code).toContain("to={'/tag/' + slug}");
   });
 
   it('does not fetch shared chrome data for block-tree content widgets on page components', () => {
@@ -616,6 +1102,56 @@ describe('CodeGeneratorService', () => {
     expect(code).toContain('<p className="profolio-fse-scroll-top" />');
   });
 
+  it('does not fetch footer-links for block-faithful CTA footers that do not declare footerLinks', () => {
+    const code = service.generateBlockFaithfulPartial({
+      componentName: 'Footer',
+      nodes: [
+        {
+          block: 'group',
+          children: [
+            {
+              block: 'heading',
+              text: "Let's Work Together",
+            },
+            {
+              block: 'paragraph',
+              text: 'CTA footer body',
+            },
+          ],
+        },
+      ],
+      dataNeeds: [],
+      palette: basePlan.palette,
+      typography: basePlan.typography,
+      layout: basePlan.layout,
+    });
+
+    expect(code).not.toContain("fetch('/api/footer-links')");
+    expect(code).not.toContain('footerColumns');
+    expect(code).toContain("Let's Work Together");
+  });
+
+  it('emits rich-text helpers for block-faithful partials with preserved HTML', () => {
+    const code = service.generateBlockFaithfulPartial({
+      componentName: 'Footer',
+      nodes: [
+        {
+          block: 'paragraph',
+          html: '<p><strong>Footer</strong> body</p>',
+        },
+      ],
+      dataNeeds: [],
+      palette: basePlan.palette,
+      typography: basePlan.typography,
+      layout: basePlan.layout,
+    });
+
+    expect(code).toContain('const renderRichTextChildren = ');
+    expect(code).toContain(
+      'renderRichTextChildren("<strong>Footer</strong> body"',
+    );
+  });
+
   it('preserves WordPress wrapper ids in block-faithful partial rendering', () => {
     const code = service.generateBlockFaithfulPartial({
       componentName: 'Header',
@@ -635,5 +1171,28 @@ describe('CodeGeneratorService', () => {
     });
 
     expect(code).toContain('<div id="sticky-header"');
+  });
+
+  it('preserves navbar domId in semantic navbar rendering', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'Header',
+      dataNeeds: ['siteInfo', 'menus'],
+      sections: [
+        {
+          type: 'navbar',
+          sticky: true,
+          domId: 'sticky-header',
+          menuSlug: 'primary',
+          orientation: 'horizontal',
+          overlayMenu: 'mobile',
+          isResponsive: true,
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain('<header id="sticky-header"');
   });
 });

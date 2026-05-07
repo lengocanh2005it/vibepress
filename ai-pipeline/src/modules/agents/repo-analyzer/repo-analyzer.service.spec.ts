@@ -182,5 +182,23 @@ describe('RepoAnalyzerService profolio-fse deep analysis', () => {
         'scroll-top',
       ]),
     );
+
+    const frontPageChain =
+      result.themeManifest.structureHints.entrySourceChains.find(
+        (entry) => entry.entryFile === 'templates/front-page.html',
+      );
+    expect(frontPageChain?.chainFiles).toEqual(
+      expect.arrayContaining([
+        'patterns/front-page.php',
+        'patterns/banner.php',
+        'patterns/services.php',
+      ]),
+    );
+    expect(
+      frontPageChain?.composedSource.match(/Welcome To My Profile/g),
+    ).toHaveLength(1);
+    expect(
+      frontPageChain?.composedSource.match(/Some Of My Projects/g),
+    ).toHaveLength(1);
   });
 });

@@ -1017,7 +1017,8 @@ function extractLeafContent(blockName: string, html: string): Partial<WpNode> {
   // Paragraph or generic text
   const textContent = stripTags(stripped).replace(/\s+/g, ' ').trim();
   if (textContent.length > 0) {
-    // For content-heavy blocks keep raw HTML so AI renders it with dangerouslySetInnerHTML
+    // For content-heavy blocks keep raw HTML so downstream rich-text renderers can
+    // preserve the original paragraph/link/inline markup structure.
     if (
       blockName === 'post-content' ||
       blockName === 'query' ||
@@ -1026,7 +1027,7 @@ function extractLeafContent(blockName: string, html: string): Partial<WpNode> {
       return { html: stripped };
     }
     // For list items, preserve inline HTML (e.g. <strong>, <em>, <a>) so the
-    // renderer can use dangerouslySetInnerHTML to keep bold/italic formatting.
+    // structured rich-text renderer can keep bold/italic/link formatting intact.
     const hasInlineHtml = /<(strong|em|b|i|a|code|mark|s|u|span)[^>]*>/i.test(
       stripped,
     );

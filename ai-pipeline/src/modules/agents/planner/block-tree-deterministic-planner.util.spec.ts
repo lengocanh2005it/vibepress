@@ -1,9 +1,13 @@
 import type { BlockNode } from '../../../common/utils/wp-node-to-block-tree.js';
 import {
   buildBlockTreeDrivenVisualPlanForComponent,
+  shouldUseAiVisualPlanningForProfolioSurface,
   shouldShortCircuitBlockTreeVisualPlan,
 } from './block-tree-deterministic-planner.util.js';
-import type { ComponentVisualPlan } from '../react-generator/visual-plan.schema.js';
+import {
+  getVisualPlanRenderAuthority,
+  type ComponentVisualPlan,
+} from '../react-generator/visual-plan.schema.js';
 
 describe('block-tree deterministic listing shells', () => {
   const componentPlan = {
@@ -442,6 +446,48 @@ describe('block-tree deterministic shared partials', () => {
     });
   });
 
+  it('pixel-locks deterministic sidebar partials when tag-cloud is the only remaining rich widget kind', () => {
+    const plan = buildBlockTreeDrivenVisualPlanForComponent({
+      ...sharedBaseInput,
+      componentPlan: {
+        templateName: 'sidebar',
+        componentName: 'Sidebar',
+        type: 'partial' as const,
+        route: null,
+        dataNeeds: ['posts'],
+        isDetail: false,
+      },
+      draftSections: [],
+      draftBlockTree: [
+        {
+          kind: 'group',
+          blockName: 'group',
+          customClassNames: ['sticky-sidebar'],
+          children: [
+            {
+              kind: 'group',
+              blockName: 'group',
+              children: [{ kind: 'search', blockName: 'search' }],
+            },
+            {
+              kind: 'group',
+              blockName: 'group',
+              children: [
+                { kind: 'heading', blockName: 'heading', text: 'Tags' },
+                { kind: 'tag-cloud', blockName: 'tag-cloud' },
+              ],
+            },
+          ],
+        },
+      ] as BlockNode[],
+    });
+
+    expect(plan?.renderMode).toBe('block-centric');
+    expect(getVisualPlanRenderAuthority(plan)).toBe('deterministic-pixel');
+    expect(plan?.lockPolicy?.bypassAiGeneration).toBe(true);
+    expect(plan?.lockPolicy?.reason).not.toContain('unsupported block kind');
+  });
+
   it('derives header logo/title visibility and CTA from the shared partial block tree', () => {
     const plan = buildBlockTreeDrivenVisualPlanForComponent({
       ...sharedBaseInput,
@@ -487,6 +533,7 @@ describe('block-tree deterministic shared partials', () => {
     expect(plan?.sections[0]).toMatchObject({
       type: 'navbar',
       sticky: true,
+      domId: 'sticky-header',
       showSiteLogo: false,
       showSiteTitle: true,
       cta: {
@@ -679,6 +726,269 @@ describe('block-tree deterministic shared partials', () => {
     expect(plan?.sections[0]).toMatchObject({
       type: 'footer',
     });
+  });
+});
+
+describe('block-tree canonical profolio pages', () => {
+  const profolioBaseInput = {
+    content: {
+      menus: [],
+      pages: [],
+      posts: [],
+      themeResolvedContent: {
+        themeSlug: 'profolio-fse',
+      },
+    } as any,
+    tokens: undefined,
+    globalPalette: {
+      background: '#ffffff',
+      surface: '#f5f5f5',
+      text: '#111111',
+      textMuted: '#666666',
+      accent: '#000000',
+      accentText: '#ffffff',
+      dark: '#000000',
+      darkText: '#ffffff',
+    },
+    globalTypography: {
+      headingFamily: 'inherit',
+      bodyFamily: 'inherit',
+      h1: 'text-4xl',
+      h2: 'text-3xl',
+      h3: 'text-2xl',
+      body: 'text-base',
+      small: 'text-sm',
+      buttonRadius: 'rounded',
+    },
+    deriveComponentLayout: () => ({
+      containerClass: 'max-w-6xl mx-auto w-full',
+      blockGap: 'gap-12',
+      includes: [],
+    }),
+    buildRichBoundPageDetailSections: () => undefined,
+    buildBoundPageContentFallbackSection: () => ({
+      type: 'page-content' as const,
+      showTitle: true,
+    }),
+  };
+
+  it('routes profolio content/listing templates through AI visual planning', () => {
+    for (const componentPlan of [
+      {
+        templateName: 'front-page',
+        componentName: 'FrontPage',
+        type: 'page' as const,
+        route: '/',
+        dataNeeds: [],
+        isDetail: false,
+      },
+      {
+        templateName: 'template-services',
+        componentName: 'TemplateServices',
+        type: 'page' as const,
+        route: '/template-services',
+        dataNeeds: ['posts'],
+        isDetail: false,
+      },
+      {
+        templateName: 'blog-left-sidebar',
+        componentName: 'BlogLeftSidebar',
+        type: 'page' as const,
+        route: '/blog-left-sidebar',
+        dataNeeds: ['posts'],
+        isDetail: false,
+      },
+      {
+        templateName: 'search',
+        componentName: 'Search',
+        type: 'page' as const,
+        route: '/search',
+        dataNeeds: ['posts'],
+        isDetail: false,
+      },
+      {
+        templateName: 'archive-product',
+        componentName: 'ArchiveProduct',
+        type: 'page' as const,
+        route: '/products',
+        dataNeeds: ['products'],
+        isDetail: false,
+      },
+    ]) {
+      expect(
+        shouldUseAiVisualPlanningForProfolioSurface({
+          componentPlan,
+          content: profolioBaseInput.content,
+        }),
+      ).toBe(true);
+    }
+  });
+
+  it('keeps profolio chrome, commerce, and detail templates on deterministic planning', () => {
+    for (const componentPlan of [
+      {
+        templateName: 'header',
+        componentName: 'Header',
+        type: 'partial' as const,
+        route: null,
+        dataNeeds: ['menus', 'site-info'],
+        isDetail: false,
+      },
+      {
+        templateName: 'checkout',
+        componentName: 'Checkout',
+        type: 'page' as const,
+        route: '/checkout',
+        dataNeeds: [],
+        isDetail: false,
+      },
+      {
+        templateName: 'single-product',
+        componentName: 'SingleProduct',
+        type: 'page' as const,
+        route: '/product/:slug',
+        dataNeeds: ['product-detail'],
+        isDetail: true,
+      },
+    ]) {
+      expect(
+        shouldUseAiVisualPlanningForProfolioSurface({
+          componentPlan,
+          content: profolioBaseInput.content,
+        }),
+      ).toBe(false);
+    }
+  });
+
+  it('keeps profolio FrontPage on AI section assembly even when the block tree is fully supported', () => {
+    const plan = buildBlockTreeDrivenVisualPlanForComponent({
+      ...profolioBaseInput,
+      componentPlan: {
+        templateName: 'front-page',
+        componentName: 'FrontPage',
+        type: 'page' as const,
+        route: '/',
+        dataNeeds: [],
+        isDetail: false,
+      },
+      draftSections: [
+        {
+          type: 'media-text',
+          heading: 'Welcome',
+          body: 'Intro',
+          imageSrc: 'theme-asset:/assets/images/banner.png',
+        },
+      ] as ComponentVisualPlan['sections'],
+      draftBlockTree: [
+        {
+          kind: 'group',
+          blockName: 'group',
+          children: [
+            {
+              kind: 'columns',
+              blockName: 'columns',
+              children: [
+                {
+                  kind: 'column',
+                  blockName: 'column',
+                  children: [
+                    {
+                      kind: 'heading',
+                      blockName: 'heading',
+                      text: 'Welcome',
+                    },
+                    {
+                      kind: 'paragraph',
+                      blockName: 'paragraph',
+                      text: 'Intro',
+                    },
+                    {
+                      kind: 'buttons',
+                      blockName: 'buttons',
+                      children: [
+                        {
+                          kind: 'button',
+                          blockName: 'button',
+                          text: 'View Work',
+                          href: '#',
+                        },
+                      ],
+                    },
+                  ],
+                },
+                {
+                  kind: 'column',
+                  blockName: 'column',
+                  children: [
+                    {
+                      kind: 'image',
+                      blockName: 'image',
+                      src: 'theme-asset:/assets/images/banner.png',
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ] as BlockNode[],
+    });
+
+    expect(plan?.renderMode).toBe('section-centric');
+    expect(getVisualPlanRenderAuthority(plan)).toBe('ai');
+    expect(plan?.deterministicAuthority).toBe(false);
+    expect(plan?.lockPolicy?.bypassAiGeneration).toBeUndefined();
+    expect(plan?.lockPolicy?.reason).toContain(
+      'AI section assembly',
+    );
+    expect(plan?.sections).toEqual([
+      expect.objectContaining({
+        generationMode: 'section-assembly',
+        heading: 'Welcome',
+      }),
+    ]);
+  });
+
+  it('keeps profolio TemplateServices on deterministic-structure when unsupported query/post block kinds remain', () => {
+    const plan = buildBlockTreeDrivenVisualPlanForComponent({
+      ...profolioBaseInput,
+      componentPlan: {
+        templateName: 'template-services',
+        componentName: 'TemplateServices',
+        type: 'page' as const,
+        route: '/services',
+        dataNeeds: ['pages'],
+        isDetail: false,
+      },
+      draftSections: [
+        {
+          type: 'card-grid',
+          columns: 3,
+          cards: [{ heading: 'Service', body: 'Description' }],
+        },
+      ] as ComponentVisualPlan['sections'],
+      draftBlockTree: [
+        {
+          kind: 'query',
+          blockName: 'query',
+          children: [
+            {
+              kind: 'post-template',
+              blockName: 'post-template',
+              children: [
+                { kind: 'post-title', blockName: 'post-title' },
+                { kind: 'post-excerpt', blockName: 'post-excerpt' },
+              ],
+            },
+          ],
+        },
+      ] as BlockNode[],
+    });
+
+    expect(plan?.renderMode).not.toBe('block-centric');
+    expect(getVisualPlanRenderAuthority(plan)).toBe('deterministic-structure');
+    expect(plan?.lockPolicy?.bypassAiGeneration).toBeUndefined();
+    expect(plan?.lockPolicy?.reason).toContain('unsupported block kind');
   });
 });
 

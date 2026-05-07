@@ -215,6 +215,7 @@ interface BaseSection {
 export interface NavbarSection extends BaseSection {
   type: 'navbar';
   sticky: boolean;
+  domId?: string;
   menuSlug: string; // e.g. "primary"
   orientation?: 'horizontal' | 'vertical';
   overlayMenu?: 'always' | 'mobile' | 'never';

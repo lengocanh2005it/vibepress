@@ -156,7 +156,7 @@ Use ONLY this runtime data shape. WordPress template structure is for layout fid
 - Do NOT invent GraphQL or WordPress wrapper fields such as \`.node\`, \`.nodes\`, \`.edges\`, or \`.rendered\`.
 - Do NOT rename \`siteInfo.siteName/siteUrl/blogDescription\` into \`name/url/description\`.
 - Pages may use ${formatFieldList(PAGE_FRONTEND_FIELDS)}, but still must NOT use post-only fields such as \`author\`, \`categories\`, \`tags\`, \`date\`, \`excerpt\`, or comments.
-- \`post.content\` and \`page.content\` are normalized HTML strings: WordPress asset URLs are rewritten, Gutenberg comments are stripped, and common dynamic blocks are rendered to HTML where possible.
+- \`post.content\` and \`page.content\` are normalized HTML strings: WordPress asset URLs are rewritten, Gutenberg comments are stripped, and common dynamic blocks are rendered to HTML where possible. Page/detail components must render canonical body content through structured JSX (for example \`renderRichTextChildren(...)\`), not \`dangerouslySetInnerHTML\`.
 - Products fetched from \`/api/post-types/product/*\` use flat fields; render \`product.price\`, \`product.buttonText\`, and \`product.buttonUrl\` directly.
 - Paginated post-list endpoints return flat \`Post[]\` plus WP-style response headers: \`X-WP-Total\`, \`X-WP-TotalPages\`, \`X-WP-CurrentPage\`, \`X-WP-PerPage\`.
 - Use \`post.authorSlug\` for author archive links; \`post.author\` is display text only.
@@ -214,7 +214,7 @@ export function buildFlatRestSchemaNote(availableVariables: string): string {
     lines.push(
       `- \`post\` fields: ${formatFieldList(POST_FIELDS)}.`,
       '- `post.title`, `post.excerpt`, `post.author`, `post.authorSlug`, `post.content`, `post.date` are plain strings.',
-      '- `post.content` is already normalized HTML suitable for `dangerouslySetInnerHTML`.',
+      '- `post.content` is normalized HTML, but detail components must render it through structured JSX such as `renderRichTextChildren(post.content ?? "", "post-content")` instead of `dangerouslySetInnerHTML`.',
       '- `post.categories`, `post.categorySlugs`, and `post.tags` are `string[]`.',
       '- Valid examples: `post.title`, `post.authorSlug`, `post.excerpt`, `post.categories[0]`, `post.categorySlugs[0]`, `post.tags[0]`.',
       '- Invalid examples: `post.title.node`, `post.excerpt.rendered`, `post.author.slug`, `post.categories.nodes`, `post.categorySlugs.nodes`, `post.tags.nodes`.',
@@ -250,7 +250,7 @@ export function buildFlatRestSchemaNote(availableVariables: string): string {
     lines.push(
       `- \`page\` fields: ${formatFieldList(PAGE_FRONTEND_FIELDS)}.`,
       '- Valid examples: `page.featuredImage`, `page.parentId`, `page.template`.',
-      '- `page.content` is already normalized HTML suitable for `dangerouslySetInnerHTML`.',
+      '- `page.content` is normalized HTML, but page components must render it through structured JSX such as `renderRichTextChildren(page.content ?? "", "page-content")` instead of `dangerouslySetInnerHTML`.',
       '- Invalid examples: `page.title.rendered`, `page.author`, `page.categories`, `page.tags`, `page.date`, `page.excerpt`.',
     );
   }

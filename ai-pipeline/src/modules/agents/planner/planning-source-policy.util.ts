@@ -108,6 +108,90 @@ function sourceLooksLikePatternShell(source: string): boolean {
   }
 }
 
+function isProfolioFsePlanningFusionEnabled(content: DbContentResult): boolean {
+  return content.themeResolvedContent?.themeSlug === 'profolio-fse';
+}
+
+function normalizePlanningThemeSlug(value: string | null | undefined): string {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase();
+}
+
+function getProfolioFseBoundPageArchetypeTemplates(): string[] {
+  return [
+    'page',
+    'template-about',
+    'template-contact',
+    'template-services',
+    'blank',
+    'full-width',
+  ];
+}
+
+function getDbTemplateCanonicalSlug(
+  template: DbContentResult['dbTemplates'][number],
+): string {
+  return normalizePlanningTemplateIdentifier(
+    template.canonicalSlug || template.slug,
+  );
+}
+
+function isTrustedProfolioFseDbTemplate(
+  template: DbContentResult['dbTemplates'][number],
+): boolean {
+  const themeSlug = normalizePlanningThemeSlug(template.themeSlug);
+  if (themeSlug === 'profolio-fse') return true;
+  if (themeSlug) return false;
+
+  const sourceEntityKey = String(template.sourceEntityKey ?? '')
+    .trim()
+    .toLowerCase();
+  if (sourceEntityKey.startsWith('profolio-fse//')) return true;
+
+  const content = String(template.content ?? '');
+  return (
+    /profolio-fse\//i.test(content) ||
+    /"theme"\s*:\s*"profolio-fse"/i.test(content)
+  );
+}
+
+export function getTrustedPlanningDbTemplates(
+  content: DbContentResult,
+): DbContentResult['dbTemplates'] {
+  if (!isProfolioFsePlanningFusionEnabled(content)) {
+    return content.dbTemplates;
+  }
+
+  return content.dbTemplates.filter((template) => {
+    const canonicalSlug = getDbTemplateCanonicalSlug(template);
+    if (!canonicalSlug) return false;
+    return isTrustedProfolioFseDbTemplate(template);
+  });
+}
+
+export function getTrustedPlanningDbTemplateSlugs(
+  content: DbContentResult,
+): string[] {
+  return getTrustedPlanningDbTemplates(content)
+    .map((template) => getDbTemplateCanonicalSlug(template))
+    .filter(Boolean);
+}
+
+function shouldForcePostsHomeRoot(
+  content: DbContentResult,
+  trustedDbTemplates: DbContentResult['dbTemplates'],
+): boolean {
+  if (content.readingSettings?.showOnFront !== 'posts') return false;
+  if (Number(content.readingSettings?.pageOnFrontId ?? 0) > 0) return false;
+  const hasTrustedDbFrontPage = trustedDbTemplates.some((template) =>
+    ['front-page', 'frontend-page'].includes(
+      getDbTemplateCanonicalSlug(template),
+    ),
+  );
+  return !hasTrustedDbFrontPage;
+}
+
 export function isAuthoritativeDbPlanningSource(
   componentPlan: PlanningSourcePolicyComponentPlan,
   label: string | undefined,
@@ -138,6 +222,119 @@ export function shouldDisableSupplementalPlanningSources(
   return isAuthoritativeDbPlanningSource(componentPlan, preferredSource.label);
 }
 
+function isRepoArchetypeLabel(label: string): boolean {
+  return /^repo-archetype:/i.test(label.trim());
+}
+
+function isRepoChainLabel(label: string): boolean {
+  return /^repo-chain:/i.test(label.trim());
+}
+
+function isDbPageContentLabel(label: string): boolean {
+  return /^(db:bound-page:|db:page:|db:page-on-front(?::|$)|db:page-for-posts(?::|$))/i.test(
+    label.trim(),
+  );
+}
+
+function isRepoLikePlanningSourceOrigin(origin: string): boolean {
+  return (
+    origin === 'repo' || origin === 'repo-chain' || origin === 'repo-archetype'
+  );
+}
+
+function shouldPreferDbPageContentPrimary(
+  componentPlan: PlanningSourcePolicyComponentPlan,
+  candidate: PlanningSourceSeed,
+  content: DbContentResult,
+): boolean {
+  if (!isProfolioFsePlanningFusionEnabled(content)) return false;
+  if (componentPlan.type !== 'page') return false;
+  if (!candidate.source.trim()) return false;
+  if (!isDbPageContentLabel(candidate.label)) return false;
+
+  const templateName = normalizePlanningTemplateIdentifier(
+    componentPlan.templateName,
+  );
+  if (/^(search|archive|404|single|single-with-sidebar)$/i.test(templateName)) {
+    return false;
+  }
+
+  if (componentPlan.route === '/') {
+    return /^(db:page-on-front(?::|$)|db:page-for-posts(?::|$))/i.test(
+      candidate.label.trim(),
+    );
+  }
+
+  return true;
+}
+
+function findProfolioFseRouteSourceSummary(
+  templateName: string,
+  repoManifest?: RepoThemeManifest,
+) {
+  if (repoManifest?.themeDeepAnalysis?.themeSlug !== 'profolio-fse') {
+    return undefined;
+  }
+
+  const normalizedTemplate = normalizePlanningTemplateIdentifier(templateName);
+  if (!normalizedTemplate) return undefined;
+
+  const familyAliases = new Set<string>([normalizedTemplate]);
+  if (normalizedTemplate === 'header') familyAliases.add('shared-header');
+  if (normalizedTemplate === 'footer') familyAliases.add('shared-footer');
+
+  return repoManifest.themeDeepAnalysis.routeSources.find((routeSource) => {
+    const entryTemplate = normalizePlanningTemplateIdentifier(
+      routeSource.entryFile,
+    );
+    return (
+      familyAliases.has(routeSource.routeFamily) ||
+      familyAliases.has(entryTemplate)
+    );
+  });
+}
+
+function findProfolioFseArchetypeEntryChain(
+  templateName: string,
+  repoManifest?: RepoThemeManifest,
+): RepoEntrySourceChain | undefined {
+  const routeSource = findProfolioFseRouteSourceSummary(
+    templateName,
+    repoManifest,
+  );
+  if (!routeSource) return undefined;
+
+  return repoManifest?.structureHints.entrySourceChains.find(
+    (chain) => chain.entryFile === routeSource.entryFile,
+  );
+}
+
+function buildProfolioFseArchetypeSeed(input: {
+  templateName: string;
+  priority: number;
+  repoManifest?: RepoThemeManifest;
+}): PlanningSourceSeed | null {
+  const routeSource = findProfolioFseRouteSourceSummary(
+    input.templateName,
+    input.repoManifest,
+  );
+  const chain = findProfolioFseArchetypeEntryChain(
+    input.templateName,
+    input.repoManifest,
+  );
+  if (!routeSource || !chain?.composedSource?.trim()) {
+    return null;
+  }
+
+  return {
+    source: chain.composedSource,
+    label: `repo-archetype:${routeSource.routeFamily}`,
+    templateName: normalizePlanningTemplateIdentifier(routeSource.entryFile),
+    sourceFile: routeSource.entryFile,
+    priority: input.priority,
+  };
+}
+
 export function extractPlanningSourceOrigin(label: string): string {
   const [origin] = label.split(':', 1);
   return origin?.trim().toLowerCase() || 'unknown';
@@ -157,10 +354,26 @@ export function isCompatibleSupplementalPlanningSource(
   const candidateTemplate = normalize(candidate.templateName);
   if (!preferredTemplate || !candidateTemplate) return false;
 
-  if (
-    preferredSource.label.startsWith('db:') &&
-    /^repo[:-]/.test(candidate.label)
-  ) {
+  const preferredLabel = preferredSource.label.trim();
+  const candidateLabel = candidate.label.trim();
+  const candidateOrigin = extractPlanningSourceOrigin(candidateLabel);
+  const candidateIsRepoArchetype = isRepoArchetypeLabel(candidateLabel);
+  const candidateIsRepoChain = isRepoChainLabel(candidateLabel);
+  const candidateIsRepoLike = isRepoLikePlanningSourceOrigin(candidateOrigin);
+  const sameTemplateFamily =
+    preferredTemplate === candidateTemplate ||
+    (componentPlan.route === '/' &&
+      !!toHomeTemplateBase(preferredTemplate) &&
+      !!toHomeTemplateBase(candidateTemplate));
+
+  if (preferredLabel.startsWith('db:') && candidateIsRepoLike) {
+    if (
+      isDbPageContentLabel(preferredLabel) &&
+      (candidateIsRepoArchetype || candidateIsRepoChain) &&
+      sameTemplateFamily
+    ) {
+      return true;
+    }
     return false;
   }
 
@@ -200,6 +413,7 @@ export function buildPlanningSourceCandidates(
     findRepresentativePagesForTemplate,
     findRepresentativePostsForTemplate,
   } = input;
+  const profolioFusionEnabled = isProfolioFsePlanningFusionEnabled(content);
   const repoEntryChain = findRepoEntrySourceChain(
     componentPlan.templateName,
     repoManifest,
@@ -208,6 +422,26 @@ export function buildPlanningSourceCandidates(
     componentPlan.type === 'page' &&
     !!repoEntryChain?.composedSource &&
     sourceLooksLikePatternShell(templateSource);
+  const profolioArchetypeSeed = buildProfolioFseArchetypeSeed({
+    templateName: componentPlan.templateName,
+    priority: preferRepoChainForPatternShell
+      ? componentPlan.route === '/'
+        ? 110
+        : componentPlan.fixedSlug
+          ? 95
+          : 80
+      : componentPlan.route === '/'
+        ? 92
+        : componentPlan.fixedSlug
+          ? 78
+          : 62,
+    repoManifest,
+  });
+  const trustedDbTemplates = getTrustedPlanningDbTemplates(content);
+  const forcePostsHomeRoot = shouldForcePostsHomeRoot(
+    content,
+    trustedDbTemplates,
+  );
   const candidates: PlanningSourceSeed[] = [];
   const seen = new Set<string>();
 
@@ -249,13 +483,22 @@ export function buildPlanningSourceCandidates(
     });
   }
 
-  pushCandidate({
-    source: templateSource,
-    label: `repo:${componentPlan.templateName}`,
-    templateName: componentPlan.templateName,
-    sourceFile: inferSourceFile(componentPlan.templateName, componentPlan.type),
-    priority: preferRepoChainForPatternShell ? 8 : repoEntryChain ? 35 : 15,
-  });
+  if (!(profolioArchetypeSeed && sourceLooksLikePatternShell(templateSource))) {
+    pushCandidate({
+      source: templateSource,
+      label: `repo:${componentPlan.templateName}`,
+      templateName: componentPlan.templateName,
+      sourceFile: inferSourceFile(
+        componentPlan.templateName,
+        componentPlan.type,
+      ),
+      priority: preferRepoChainForPatternShell ? 8 : repoEntryChain ? 35 : 15,
+    });
+  }
+
+  if (profolioArchetypeSeed) {
+    pushCandidate(profolioArchetypeSeed);
+  }
 
   pushCandidate({
     source: repoEntryChain?.composedSource,
@@ -279,10 +522,26 @@ export function buildPlanningSourceCandidates(
 
   if (componentPlan.route === '/') {
     for (const templateName of ['front-page', 'home', 'index']) {
+      if (forcePostsHomeRoot && templateName === 'front-page') {
+        continue;
+      }
       const candidateChain = findRepoEntrySourceChain(
         templateName,
         repoManifest,
       );
+      const archetypeSeed = buildProfolioFseArchetypeSeed({
+        templateName,
+        priority:
+          templateName === 'front-page'
+            ? 100
+            : templateName === 'home'
+              ? 78
+              : 63,
+        repoManifest,
+      });
+      if (archetypeSeed) {
+        pushCandidate(archetypeSeed);
+      }
       pushCandidate({
         source: candidateChain?.composedSource ?? sourceMap.get(templateName),
         label: `repo:${templateName}`,
@@ -339,18 +598,21 @@ export function buildPlanningSourceCandidates(
       priority: 45,
     });
 
-    for (const dbTemplate of content.dbTemplates.filter((entry) =>
-      ['front-page', 'home', 'index'].includes(entry.slug),
+    for (const dbTemplate of trustedDbTemplates.filter((entry) =>
+      ['front-page', 'home', 'index'].includes(
+        getDbTemplateCanonicalSlug(entry),
+      ),
     )) {
+      const canonicalSlug = getDbTemplateCanonicalSlug(dbTemplate);
       pushCandidate({
         source: dbTemplate.content,
-        label: `db:${dbTemplate.postType}:${dbTemplate.slug}`,
-        templateName: dbTemplate.slug,
-        sourceFile: `db:${dbTemplate.postType}/${dbTemplate.slug}`,
+        label: `db:${dbTemplate.postType}:${canonicalSlug}`,
+        templateName: canonicalSlug,
+        sourceFile: `db:${dbTemplate.postType}/${canonicalSlug}`,
         priority:
-          dbTemplate.slug === 'front-page'
+          canonicalSlug === 'front-page'
             ? 55
-            : dbTemplate.slug === 'home'
+            : canonicalSlug === 'home'
               ? 50
               : 40,
       });
@@ -395,7 +657,33 @@ export function buildPlanningSourceCandidates(
         (templateName, index, all) => all.indexOf(templateName) === index,
       );
 
+    if (
+      profolioFusionEnabled &&
+      (assignedTemplate === '' ||
+        assignedTemplate === 'default' ||
+        pageTemplateNames.length <= 2)
+    ) {
+      for (const templateName of getProfolioFseBoundPageArchetypeTemplates()) {
+        if (!pageTemplateNames.includes(templateName)) {
+          pageTemplateNames.push(templateName);
+        }
+      }
+    }
+
     for (const templateName of pageTemplateNames) {
+      const archetypeSeed = buildProfolioFseArchetypeSeed({
+        templateName,
+        priority:
+          assignedTemplate && templateName === assignedTemplate
+            ? 88
+            : templateName.startsWith('page-')
+              ? 72
+              : 52,
+        repoManifest,
+      });
+      if (archetypeSeed) {
+        pushCandidate(archetypeSeed);
+      }
       const chain = findRepoEntrySourceChain(templateName, repoManifest);
       pushCandidate({
         source: chain?.composedSource ?? sourceMap.get(templateName),
@@ -443,15 +731,16 @@ export function buildPlanningSourceCandidates(
         `page-${componentPlan.fixedSlug}`,
       ].filter(Boolean),
     );
-    for (const dbTemplate of content.dbTemplates.filter((entry) =>
-      pageTemplateSlugs.has(entry.slug),
+    for (const dbTemplate of trustedDbTemplates.filter((entry) =>
+      pageTemplateSlugs.has(getDbTemplateCanonicalSlug(entry)),
     )) {
+      const canonicalSlug = getDbTemplateCanonicalSlug(dbTemplate);
       pushCandidate({
         source: dbTemplate.content,
-        label: `db:${dbTemplate.postType}:${dbTemplate.slug}`,
-        templateName: dbTemplate.slug,
-        sourceFile: `db:${dbTemplate.postType}/${dbTemplate.slug}`,
-        priority: dbTemplate.slug === componentPlan.fixedSlug ? 55 : 40,
+        label: `db:${dbTemplate.postType}:${canonicalSlug}`,
+        templateName: canonicalSlug,
+        sourceFile: `db:${dbTemplate.postType}/${canonicalSlug}`,
+        priority: canonicalSlug === componentPlan.fixedSlug ? 55 : 40,
       });
     }
   }
@@ -484,6 +773,7 @@ export function buildPlanningSourceCandidates(
 
   const preferRepoFrontPageForRoot =
     componentPlan.route === '/' &&
+    !forcePostsHomeRoot &&
     candidates.some((candidate) => {
       const normalizedLabel = candidate.label.trim().toLowerCase();
       return (
@@ -518,15 +808,34 @@ export function buildPlanningSourceCandidates(
       isAuthoritativeDbPlanningSource(componentPlan, candidate.label),
   );
 
-  const filteredCandidates = hasAuthoritativeDbCandidate
-    ? filteredRootCandidates.filter((candidate) =>
-        candidate.label.startsWith('db:'),
-      )
-    : hasRichDbCandidate
-      ? filteredRootCandidates.filter(
-          (candidate) => !/^repo:/.test(candidate.label),
-        )
-      : filteredRootCandidates;
+  const filteredCandidates =
+    profolioFusionEnabled && (hasAuthoritativeDbCandidate || hasRichDbCandidate)
+      ? filteredRootCandidates.filter((candidate) => {
+          const label = candidate.label.trim().toLowerCase();
+          if (label.startsWith('db:')) return true;
+          if (/^repo-chain:/.test(label) || /^repo-archetype:/.test(label)) {
+            return true;
+          }
+          if (
+            componentPlan.fixedSlug &&
+            /^repo:/.test(label) &&
+            getProfolioFseBoundPageArchetypeTemplates().includes(
+              normalizePlanningTemplateIdentifier(candidate.templateName),
+            )
+          ) {
+            return true;
+          }
+          return !hasRichDbCandidate && !hasAuthoritativeDbCandidate;
+        })
+      : hasAuthoritativeDbCandidate
+        ? filteredRootCandidates.filter((candidate) =>
+            candidate.label.startsWith('db:'),
+          )
+        : hasRichDbCandidate
+          ? filteredRootCandidates.filter(
+              (candidate) => !/^repo:/.test(candidate.label),
+            )
+          : filteredRootCandidates;
 
   return filteredCandidates
     .map((candidate) => ({
@@ -535,6 +844,9 @@ export function buildPlanningSourceCandidates(
         scorePlanningSourceRichness(candidate.source) +
         (isAuthoritativeDbPlanningSource(componentPlan, candidate.label)
           ? 50000
+          : 0) +
+        (shouldPreferDbPageContentPrimary(componentPlan, candidate, content)
+          ? 20000
           : 0) +
         (componentPlan.fixedSlug && candidate.label.startsWith('db:bound-page:')
           ? 10000

@@ -255,25 +255,62 @@ export class DbContentService {
       slug: page.slug,
       parentId: page.parentId,
     }));
+    const navigationRecords = [
+      ...input.dbNavigations.map(
+        (nav) =>
+          ({
+            kind: 'db-navigation',
+            slug: nav.slug,
+            title: nav.title,
+            location: nav.location,
+            itemTitles: nav.items.map((item) => item.title),
+            itemUrls: nav.items.map((item) => item.url),
+          }) satisfies DbThemeResolvedNavigationSummary,
+      ),
+      ...input.menus.map(
+        (menu) =>
+          ({
+            kind: 'menu',
+            slug: menu.slug,
+            title: menu.name,
+            location: menu.location,
+            itemTitles: menu.items.map((item) => item.title),
+            itemUrls: menu.items.map((item) => item.url),
+          }) satisfies DbThemeResolvedNavigationSummary,
+      ),
+    ];
+    const pageRoutePaths = new Map<number, string>(
+      input.pages.map((page) => [
+        Number(page.id),
+        buildCanonicalPagePath(
+          {
+            id: page.id,
+            slug: page.slug,
+            parentId: page.parentId,
+          },
+          pageRecords,
+          { frontPageId },
+        ),
+      ]),
+    );
+    const navigationLabelsByRoute = this.buildNavigationLabelsByRoute(
+      input.pages,
+      pageRoutePaths,
+      navigationRecords,
+    );
     const routes = input.pages.map((page) => {
       const isFrontPage =
         frontPageId !== null && Number(page.id) === Number(frontPageId);
       const isPostsPage =
         input.readingSettings.pageForPostsId !== null &&
         Number(page.id) === Number(input.readingSettings.pageForPostsId);
-      const routePath = buildCanonicalPagePath(
-        {
-          id: page.id,
-          slug: page.slug,
-          parentId: page.parentId,
-        },
-        pageRecords,
-        { frontPageId },
-      );
+      const routePath = pageRoutePaths.get(Number(page.id)) ?? `/${page.slug}`;
       const templateCandidates = this.buildPageTemplateCandidates({
         page,
+        routePath,
         isFrontPage,
         isPostsPage,
+        navigationLabels: navigationLabelsByRoute.get(routePath) ?? [],
       });
       const matchedDbTemplates = input.dbTemplates.filter(
         (template) =>
@@ -333,31 +370,6 @@ export class DbContentService {
             blockTypes: template.blockTypes,
           }) satisfies DbThemeResolvedTemplateSummary,
       );
-
-    const navigationRecords = [
-      ...input.dbNavigations.map(
-        (nav) =>
-          ({
-            kind: 'db-navigation',
-            slug: nav.slug,
-            title: nav.title,
-            location: nav.location,
-            itemTitles: nav.items.map((item) => item.title),
-            itemUrls: nav.items.map((item) => item.url),
-          }) satisfies DbThemeResolvedNavigationSummary,
-      ),
-      ...input.menus.map(
-        (menu) =>
-          ({
-            kind: 'menu',
-            slug: menu.slug,
-            title: menu.name,
-            location: menu.location,
-            itemTitles: menu.items.map((item) => item.title),
-            itemUrls: menu.items.map((item) => item.url),
-          }) satisfies DbThemeResolvedNavigationSummary,
-      ),
-    ];
 
     const frontPageRoute =
       routes.find((route) => route.isFrontPage)?.routePath ?? null;
@@ -419,8 +431,10 @@ export class DbContentService {
 
   private buildPageTemplateCandidates(input: {
     page: WpPage;
+    routePath: string;
     isFrontPage: boolean;
     isPostsPage: boolean;
+    navigationLabels: string[];
   }): string[] {
     const candidates = new Set<string>();
     const normalizedTemplate = this.normalizePageTemplateSlug(
@@ -439,10 +453,181 @@ export class DbContentService {
     if (normalizedTemplate) {
       candidates.add(normalizedTemplate);
     }
+    for (const candidate of this.inferSemanticTemplateCandidates(input)) {
+      candidates.add(candidate);
+    }
     if (candidates.size === 0) {
       candidates.add('page');
     }
     return Array.from(candidates);
+  }
+
+  private inferSemanticTemplateCandidates(input: {
+    page: WpPage;
+    routePath: string;
+    isFrontPage: boolean;
+    isPostsPage: boolean;
+    navigationLabels: string[];
+  }): string[] {
+    if (input.isFrontPage || input.isPostsPage) return [];
+
+    const textParts = [
+      input.page.title,
+      input.page.slug,
+      input.routePath,
+      ...input.navigationLabels,
+      this.extractPlainTextFromMarkup(input.page.content).slice(0, 1200),
+    ];
+    const haystack = textParts.filter(Boolean).join(' \n ').toLowerCase();
+    const blockTypes = new Set(
+      this.extractBlockTypesFromMarkup(input.page.content),
+    );
+    const familyScores = new Map<string, number>();
+    const addScore = (family: string, value: number) => {
+      familyScores.set(family, (familyScores.get(family) ?? 0) + value);
+    };
+    const containsAny = (patterns: RegExp[]): boolean =>
+      patterns.some((pattern) => pattern.test(haystack));
+
+    if (
+      containsAny([
+        /\babout\b/,
+        /\bour story\b/,
+        /\bwho we are\b/,
+        /\bcompany\b/,
+        /\bmission\b/,
+        /\bvision\b/,
+        /\bteam\b/,
+        /\bchúng tôi\b/,
+        /\bsứ mệnh\b/,
+      ])
+    ) {
+      addScore('template-about', 4);
+    }
+    if (
+      containsAny([
+        /\bservice\b/,
+        /\bservices\b/,
+        /\btechnology\b/,
+        /\btech\b/,
+        /\bsolution\b/,
+        /\bsolutions\b/,
+        /\bapi\b/,
+        /\btự động hóa\b/,
+        /\bthanh toán\b/,
+        /\bcông nghệ\b/,
+      ])
+    ) {
+      addScore('template-services', 4);
+    }
+    if (
+      containsAny([
+        /\bcontact\b/,
+        /\bget in touch\b/,
+        /\breach us\b/,
+        /\baddress\b/,
+        /\bemail\b/,
+        /\bphone\b/,
+        /\bliên hệ\b/,
+      ])
+    ) {
+      addScore('template-contact', 5);
+    }
+    if (
+      containsAny([/\bblog\b/, /\bnews\b/, /\barticles?\b/, /\binsights?\b/])
+    ) {
+      addScore('blog-right-sidebar', 4);
+    }
+
+    if (
+      blockTypes.has('core/latest-posts') ||
+      blockTypes.has('core/query') ||
+      blockTypes.has('core/categories') ||
+      blockTypes.has('core/tag-cloud')
+    ) {
+      addScore('blog-right-sidebar', 2);
+    }
+    if (blockTypes.has('core/search')) {
+      addScore('template-contact', 1);
+      addScore('blog-right-sidebar', 1);
+    }
+
+    const resolved = Array.from(familyScores.entries())
+      .filter(([, score]) => score >= 4)
+      .sort((a, b) => b[1] - a[1])
+      .map(([family]) => family);
+
+    if (resolved.length === 0) {
+      return [];
+    }
+
+    return [...new Set([...resolved, 'page'])];
+  }
+
+  private buildNavigationLabelsByRoute(
+    pages: WpPage[],
+    pageRoutePaths: Map<number, string>,
+    navigationRecords: DbThemeResolvedNavigationSummary[],
+  ): Map<string, string[]> {
+    const labelsByRoute = new Map<string, Set<string>>();
+    const pageIdByRoute = new Map<string, number>(
+      pages.map((page) => [
+        pageRoutePaths.get(Number(page.id)) ?? `/${page.slug}`,
+        page.id,
+      ]),
+    );
+    const addLabel = (routePath: string, label: string) => {
+      const normalizedRoute = this.normalizeNavigationRoute(routePath);
+      const normalizedLabel = String(label ?? '').trim();
+      if (!normalizedRoute || !normalizedLabel) return;
+      if (!labelsByRoute.has(normalizedRoute)) {
+        labelsByRoute.set(normalizedRoute, new Set<string>());
+      }
+      labelsByRoute.get(normalizedRoute)?.add(normalizedLabel);
+    };
+
+    for (const record of navigationRecords) {
+      record.itemUrls.forEach((url, index) => {
+        const routePath = this.normalizeNavigationRoute(url);
+        const label = record.itemTitles[index] ?? '';
+        if (routePath) addLabel(routePath, label);
+      });
+    }
+
+    for (const page of pages) {
+      const routePath = pageRoutePaths.get(Number(page.id)) ?? `/${page.slug}`;
+      const pageId = pageIdByRoute.get(routePath);
+      if (pageId !== Number(page.id)) continue;
+      addLabel(routePath, page.title);
+    }
+
+    return new Map(
+      Array.from(labelsByRoute.entries()).map(([route, labels]) => [
+        route,
+        Array.from(labels),
+      ]),
+    );
+  }
+
+  private normalizeNavigationRoute(url: string): string {
+    const raw = String(url ?? '').trim();
+    if (!raw) return '';
+    try {
+      const parsed = new URL(raw, 'http://local.test');
+      const pathname = parsed.pathname || '/';
+      if (!pathname || pathname === '/') return '/';
+      return pathname.replace(/\/+$/, '') || '/';
+    } catch {
+      return raw.replace(/^https?:\/\/[^/]+/i, '').replace(/\/+$/, '') || '/';
+    }
+  }
+
+  private extractPlainTextFromMarkup(content: string): string {
+    return String(content ?? '')
+      .replace(/<!--[\s\S]*?-->/g, ' ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
   }
 
   private normalizePageTemplateSlug(template: string): string {

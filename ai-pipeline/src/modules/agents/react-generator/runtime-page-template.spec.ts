@@ -8,24 +8,42 @@ describe('RuntimePage template source', () => {
   );
   const source = readFileSync(templatePath, 'utf-8');
 
-  it('preserves source wrappers by embedding overlay sections without generic containers', () => {
-    expect(source).toContain(
-      'const preserveWrapper = binding?.preserveWrapper !== false;',
-    );
-    expect(source).toContain('embedded: preserveWrapper');
-    expect(source).toContain('if (options.embedded) {');
-    expect(source).toContain('return <Fragment>{children}</Fragment>;');
+  it('uses the runtime-page endpoint as the only page data source', () => {
+    expect(source).toContain('/api/runtime/pages/${encodeURIComponent(slug)}');
+    expect(source).not.toContain('/api/posts?perPage=');
+    expect(source).not.toContain('setPosts');
   });
 
-  it('avoids injecting fallback max-width shell classes for embedded sections', () => {
-    expect(source).toContain("embedded\n      ? ''");
-    expect(source).toContain(": 'mx-auto max-w-6xl px-6 py-12';");
+  it('treats the API page.content as render-ready canonical markup', () => {
+    expect(source).toContain('const { page, runtimePlan } = payload;');
+    expect(source).toContain('renderRichTextChildren(page.content ??');
+    expect(source).not.toContain('runtimePlan.blockTree');
+    expect(source).not.toContain('renderRuntimeNodes');
   });
 
-  it('supports query loop hydration and profolio-specific runtime page classes', () => {
-    expect(source).toContain('collectRuntimeQueryDescriptors');
-    expect(source).toContain("case 'core/query':");
-    expect(source).toContain('renderRuntimeQueryNode');
+  it('keeps runtime metadata attributes for preview/edit routing', () => {
+    expect(source).toContain('data-runtime-component="RuntimePage"');
+    expect(source).toContain('data-runtime-slug={page.slug}');
+    expect(source).toContain('data-runtime-source-kind={sourceKind}');
+  });
+
+  it('keeps profolio-specific runtime page classes', () => {
     expect(source).toContain('runtime-page--theme-profolio-fse');
+  });
+
+  it('renders runtime page HTML through rich-text nodes instead of escaping raw content', () => {
+    expect(source).toContain('renderRichTextChildren(page.content ??');
+    expect(source).not.toContain('{payload.page.content}');
+    expect(source).not.toContain('{page.content}');
+    expect(source).not.toContain('dangerouslySetInnerHTML');
+    expect(source).not.toContain('__html');
+  });
+
+  it('preserves common WordPress HTML tags, classes, styles, images, and links', () => {
+    expect(source).toContain('ALLOWED_TAGS');
+    expect(source).toContain('className = element.getAttribute');
+    expect(source).toContain('parseStyle(element.getAttribute');
+    expect(source).toContain('function renderImage');
+    expect(source).toContain('function renderAnchor');
   });
 });

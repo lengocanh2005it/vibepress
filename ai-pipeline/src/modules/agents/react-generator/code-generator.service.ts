@@ -218,9 +218,7 @@ export class CodeGeneratorService {
     const effectiveDataNeeds = Array.from(new Set(dataNeeds));
     const needsSiteInfo = effectiveDataNeeds.includes('siteInfo');
     const needsMenus = effectiveDataNeeds.includes('menus');
-    const needsFooterLinks =
-      effectiveDataNeeds.includes('footerLinks') ||
-      /^footer/i.test(componentName);
+    const needsFooterLinks = effectiveDataNeeds.includes('footerLinks');
     const ctx: RenderCtx = {
       p: palette ?? {
         background: '#ffffff',
@@ -258,6 +256,7 @@ export class CodeGeneratorService {
     const rootTag =
       renderState.componentKind === 'footer' ? 'footer' : 'header';
     const fragment = this.renderBlockFaithfulNodes(nodes, ctx, renderState, 3);
+    const needsRichTextHelpers = this.wpNodesContainRichHtml(nodes);
     const lines: string[] = [
       "import React, { useEffect, useState } from 'react';",
       `import { Link${needsMenus && renderState.componentKind === 'header' ? ', useLocation' : ''} } from 'react-router-dom';`,
@@ -266,6 +265,10 @@ export class CodeGeneratorService {
       '',
       `const ${componentName}: React.FC = () => {`,
     ];
+
+    if (needsRichTextHelpers) {
+      this.pushRichTextHelperLines(lines);
+    }
 
     if (needsSiteInfo) {
       lines.push(
@@ -569,6 +572,8 @@ export class CodeGeneratorService {
    */
   private deriveDataNeeds(plan: ComponentVisualPlan): DataNeed[] {
     const needs = new Set(plan.dataNeeds);
+    const allowImplicitPageDetailFromProse =
+      this.shouldInferPageDetailFromProse(plan);
     for (const section of plan.sections) {
       switch (section.type) {
         case 'navbar':
@@ -607,8 +612,12 @@ export class CodeGeneratorService {
           needs.add(plan.dataNeeds.includes('products') ? 'products' : 'posts');
           break;
         case 'page-content':
-        case 'prose-block':
           needs.add('pageDetail');
+          break;
+        case 'prose-block':
+          if (allowImplicitPageDetailFromProse) {
+            needs.add('pageDetail');
+          }
           break;
         case 'sidebar': {
           const sidebar = section as SidebarSection;
@@ -633,6 +642,12 @@ export class CodeGeneratorService {
       this.collectBlockTreeDataNeeds(plan.blockTree, needs);
     }
     return Array.from(needs);
+  }
+
+  private shouldInferPageDetailFromProse(plan: ComponentVisualPlan): boolean {
+    if (plan.dataNeeds.includes('pageDetail')) return true;
+    if (plan.runtimeRenderer === 'runtime-page') return true;
+    return Boolean(plan.pageBinding?.slug);
   }
 
   private collectBlockTreeDataNeeds(
@@ -807,8 +822,120 @@ export class CodeGeneratorService {
   private shouldAvoidDangerouslySetInnerHTML(
     plan: ComponentVisualPlan,
   ): boolean {
-    if (isPartialComponentName(plan.componentName)) return false;
+    if (isPartialComponentName(plan.componentName)) {
+      return (plan.blockTree ?? []).some((node) =>
+        this.blockTreeContainsRichHtml(node),
+      );
+    }
     return true;
+  }
+
+  private blockTreeContainsRichHtml(node: BlockNode): boolean {
+    if (typeof node.html === 'string' && node.html.trim().length > 0) {
+      return true;
+    }
+    return (node.children ?? []).some((child) =>
+      this.blockTreeContainsRichHtml(child),
+    );
+  }
+
+  private wpNodesContainRichHtml(nodes: WpNode[]): boolean {
+    const visit = (node: WpNode): boolean => {
+      if (typeof node.html === 'string' && node.html.trim().length > 0) {
+        return true;
+      }
+      return (node.children ?? []).some(visit);
+    };
+    return nodes.some(visit);
+  }
+
+  private pushRichTextHelperLines(lines: string[]): void {
+    lines.push(`  const SAFE_RICH_TEXT_TAGS = new Set([`);
+    lines.push(
+      `    'a', 'blockquote', 'br', 'code', 'div', 'em', 'figcaption', 'figure', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hr', 'i', 'img', 'li', 'mark', 'ol', 'p', 'pre', 's', 'small', 'span', 'strong', 'sub', 'sup', 'u', 'ul',`,
+    );
+    lines.push(`  ]);`);
+    lines.push(
+      `  const renderRichTextNode = (node: ChildNode, key: string): React.ReactNode => {`,
+    );
+    lines.push(
+      `    if (node.nodeType === Node.TEXT_NODE) return node.textContent;`,
+    );
+    lines.push(`    if (node.nodeType !== Node.ELEMENT_NODE) return null;`);
+    lines.push(`    const element = node as HTMLElement;`);
+    lines.push(`    const tag = element.tagName.toLowerCase();`);
+    lines.push(
+      `    const className = element.getAttribute('class') || undefined;`,
+    );
+    lines.push(
+      `    const title = element.getAttribute('title') || undefined;`,
+    );
+    lines.push(`    const children = Array.from(element.childNodes)`);
+    lines.push(
+      `      .map((child, index) => renderRichTextNode(child, \`\${key}-\${index}\`));`,
+    );
+    lines.push(
+      `    const filteredChildren = children.filter((child) => child !== null && child !== undefined) as React.ReactNode[];`,
+    );
+    lines.push(`    if (tag === 'a') {`);
+    lines.push(`      const href = element.getAttribute('href') || '#';`);
+    lines.push(`      return React.createElement(`);
+    lines.push(`        'a',`);
+    lines.push(
+      `        { key, href, className, title, target: element.getAttribute('target') || undefined, rel: element.getAttribute('rel') || undefined },`,
+    );
+    lines.push(
+      `        filteredChildren.length > 0 ? filteredChildren : (element.textContent || href),`,
+    );
+    lines.push(`      );`);
+    lines.push(`    }`);
+    lines.push(`    if (tag === 'img') {`);
+    lines.push(`      return React.createElement('img', {`);
+    lines.push(`        key,`);
+    lines.push(`        src: element.getAttribute('src') || '',`);
+    lines.push(`        alt: element.getAttribute('alt') || '',`);
+    lines.push(`        className,`);
+    lines.push(`        title,`);
+    lines.push(`      });`);
+    lines.push(`    }`);
+    lines.push(`    if (tag === 'br' || tag === 'hr') {`);
+    lines.push(
+      `      return React.createElement(tag, { key, className, title });`,
+    );
+    lines.push(`    }`);
+    lines.push(`    if (!SAFE_RICH_TEXT_TAGS.has(tag)) {`);
+    lines.push(
+      `      return React.createElement(React.Fragment, { key }, ...filteredChildren);`,
+    );
+    lines.push(`    }`);
+    lines.push(`    const props: Record<string, unknown> = { key };`);
+    lines.push(`    if (className) props.className = className;`);
+    lines.push(`    if (title) props.title = title;`);
+    lines.push(`    return React.createElement(`);
+    lines.push(`      tag,`);
+    lines.push(`      props,`);
+    lines.push(
+      `      filteredChildren.length > 0 ? filteredChildren : (element.textContent || ''),`,
+    );
+    lines.push(`    );`);
+    lines.push(`  };`);
+    lines.push(
+      `  const renderRichTextChildren = (html: string, keyPrefix: string): React.ReactNode[] => {`,
+    );
+    lines.push(
+      `    const doc = new DOMParser().parseFromString(\`<div>\${html}</div>\`, 'text/html');`,
+    );
+    lines.push(`    const container = doc.body.firstElementChild;`);
+    lines.push(`    if (!container) return [];`);
+    lines.push(`    return Array.from(container.childNodes)`);
+    lines.push(
+      `      .map((child, index) => renderRichTextNode(child, \`\${keyPrefix}-\${index}\`))`,
+    );
+    lines.push(
+      `      .filter((child) => child !== null && child !== undefined) as React.ReactNode[];`,
+    );
+    lines.push(`  };`);
+    lines.push('');
   }
 
   private planUsesResolveAsset(plan: ComponentVisualPlan): boolean {
@@ -982,7 +1109,7 @@ export class CodeGeneratorService {
       );
       lines.push(`    const children = Array.from(element.childNodes)`);
       lines.push(
-        `      .map((child, index) => renderRichTextNode(child, \`\${key}-\${index}\`))`,
+        `      .map((child, index) => renderRichTextNode(child, \`\${key}-\${index}\`));`,
       );
       lines.push(
         `    const filteredChildren = children.filter((child) => child !== null && child !== undefined) as React.ReactNode[];`,
@@ -1056,54 +1183,38 @@ export class CodeGeneratorService {
       lines.push(
         `  const [footerColumns, setFooterColumns] = useState<FooterColumn[]>([]);`,
       );
-    if (dataNeeds.includes('posts')) {
-      if (needsPostsPagination) {
+    if (
+      needsPostsPagination &&
+      (dataNeeds.includes('posts') || dataNeeds.includes('products'))
+    ) {
+      lines.push(`  const [searchParams, setSearchParams] = useSearchParams();`);
+      lines.push(
+        `  const currentPage = Math.max(1, Number(searchParams.get('page') ?? '1') || 1);`,
+      );
+      if (/^search$/i.test(plan.componentName)) {
         lines.push(
-          `  const [searchParams, setSearchParams] = useSearchParams();`,
+          `  const searchTerm = searchParams.get('q') ?? searchParams.get('s') ?? '';`,
         );
-        lines.push(
-          `  const currentPage = Math.max(1, Number(searchParams.get('page') ?? '1') || 1);`,
-        );
-        lines.push(`  const perPage = 10;`);
-        lines.push(`  const [totalPages, setTotalPages] = useState(1);`);
-        lines.push(`  const updatePage = (nextPage: number) => {`);
-        lines.push(
-          `    const safePage = Math.min(Math.max(nextPage, 1), Math.max(totalPages, 1));`,
-        );
-        lines.push(`    const nextParams = new URLSearchParams(searchParams);`);
-        lines.push(`    if (safePage <= 1) nextParams.delete('page');`);
-        lines.push(`    else nextParams.set('page', String(safePage));`);
-        lines.push(`    setSearchParams(nextParams);`);
-        lines.push(
-          `    if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });`,
-        );
-        lines.push(`  };`);
       }
+      lines.push(`  const perPage = 10;`);
+      lines.push(`  const [totalPages, setTotalPages] = useState(1);`);
+      lines.push(`  const updatePage = (nextPage: number) => {`);
+      lines.push(
+        `    const safePage = Math.min(Math.max(nextPage, 1), Math.max(totalPages, 1));`,
+      );
+      lines.push(`    const nextParams = new URLSearchParams(searchParams);`);
+      lines.push(`    if (safePage <= 1) nextParams.delete('page');`);
+      lines.push(`    else nextParams.set('page', String(safePage));`);
+      lines.push(`    setSearchParams(nextParams);`);
+      lines.push(
+        `    if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });`,
+      );
+      lines.push(`  };`);
+    }
+    if (dataNeeds.includes('posts')) {
       lines.push(`  const [posts, setPosts] = useState<Post[]>([]);`);
     }
     if (dataNeeds.includes('products')) {
-      if (needsPostsPagination) {
-        lines.push(
-          `  const [searchParams, setSearchParams] = useSearchParams();`,
-        );
-        lines.push(
-          `  const currentPage = Math.max(1, Number(searchParams.get('page') ?? '1') || 1);`,
-        );
-        lines.push(`  const perPage = 10;`);
-        lines.push(`  const [totalPages, setTotalPages] = useState(1);`);
-        lines.push(`  const updatePage = (nextPage: number) => {`);
-        lines.push(
-          `    const safePage = Math.min(Math.max(nextPage, 1), Math.max(totalPages, 1));`,
-        );
-        lines.push(`    const nextParams = new URLSearchParams(searchParams);`);
-        lines.push(`    if (safePage <= 1) nextParams.delete('page');`);
-        lines.push(`    else nextParams.set('page', String(safePage));`);
-        lines.push(`    setSearchParams(nextParams);`);
-        lines.push(
-          `    if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });`,
-        );
-        lines.push(`  };`);
-      }
       lines.push(`  const [products, setProducts] = useState<Product[]>([]);`);
     }
     if (dataNeeds.includes('pages'))
@@ -1401,9 +1512,10 @@ export class CodeGeneratorService {
     }
     if (dataNeeds.includes('posts')) {
       if (needsPostsPagination) {
-        fetches.push(
-          `fetch(\`/api/posts?page=\${currentPage}&perPage=\${perPage}\`)`,
-        );
+        const postsUrl = /^search$/i.test(plan.componentName)
+          ? `fetch(\`/api/posts?page=\${currentPage}&perPage=\${perPage}\${searchTerm ? \`&search=\${encodeURIComponent(searchTerm)}\` : ''}\`)`
+          : `fetch(\`/api/posts?page=\${currentPage}&perPage=\${perPage}\`)`;
+        fetches.push(postsUrl);
         setters.push(
           `const postsData = await res${fetches.length - 1}.json(); setPosts(Array.isArray(postsData) ? postsData : []); setTotalPages(Number(res${fetches.length - 1}.headers.get('X-WP-TotalPages') ?? '1'));`,
         );
@@ -1524,7 +1636,11 @@ export class CodeGeneratorService {
     ) {
       lines.push(`  }, [slug]);`);
     } else if (dataNeeds.includes('posts') && needsPostsPagination) {
-      lines.push(`  }, [currentPage]);`);
+      lines.push(
+        /^search$/i.test(plan.componentName)
+          ? `  }, [currentPage, searchTerm]);`
+          : `  }, [currentPage]);`,
+      );
     } else {
       lines.push(`  }, []);`);
     }
@@ -2143,10 +2259,13 @@ export default ${componentName};`;
     nodes: BlockNode[],
     ctx: RenderCtx,
     componentName: string,
+    plan?: ComponentVisualPlan,
     depth = 0,
   ): string {
     return nodes
-      .map((node) => this.renderBlockNode(node, ctx, componentName, depth))
+      .map((node) =>
+        this.renderBlockNode(node, ctx, componentName, depth, plan),
+      )
       .filter(Boolean)
       .join('\n');
   }
@@ -2175,16 +2294,30 @@ export default ${componentName};`;
     )}}`;
   }
 
+  private unwrapRichTextBlockHtml(html: string, tagNames: string[]): string {
+    const trimmed = html.trim();
+    if (!trimmed) return html;
+    const allowed = tagNames.map((tag) => tag.toLowerCase());
+    for (const tag of allowed) {
+      const match = trimmed.match(
+        new RegExp(`^<${tag}(?:\\s[^>]*)?>([\\s\\S]*)<\\/${tag}>$`, 'i'),
+      );
+      if (match?.[1] != null) return match[1].trim();
+    }
+    return html;
+  }
+
   private renderBlockNode(
     node: BlockNode,
     ctx: RenderCtx,
     componentName: string,
     depth: number,
+    plan?: ComponentVisualPlan,
   ): string {
     const tagName = this.blockNodeTagName(node, 'div');
     const indent = '  '.repeat(depth + 3);
     const children = node.children?.length
-      ? `\n${this.renderBlockTree(node.children, ctx, componentName, depth + 1)}\n${indent}`
+      ? `\n${this.renderBlockTree(node.children, ctx, componentName, plan, depth + 1)}\n${indent}`
       : '';
     const styleAttr = this.blockNodeStyleAttr(node);
 
@@ -2221,7 +2354,7 @@ export default ${componentName};`;
 
       case 'paragraph':
         if (node.html) {
-          return `${indent}<p${this.blockNodeClassAttr(node)}${styleAttr}>{renderRichTextChildren(${JSON.stringify(node.html)}, "${node.sourceRef?.sourceNodeId ?? 'p'}")}</p>`;
+          return `${indent}<p${this.blockNodeClassAttr(node)}${styleAttr}>{renderRichTextChildren(${JSON.stringify(this.unwrapRichTextBlockHtml(node.html, ['p']))}, "${node.sourceRef?.sourceNodeId ?? 'p'}")}</p>`;
         }
         return `${indent}<p${this.blockNodeClassAttr(node)}${styleAttr}>${this.blockTreeTextLiteral(node.text)}</p>`;
 
@@ -2263,16 +2396,16 @@ export default ${componentName};`;
         return `${indent}<hr${this.blockNodeClassAttr(node)}${styleAttr} />`;
 
       case 'post-title':
-        return `${indent}<h1 className="post-title"{styleAttr}>{item?.title}</h1>`;
+        return `${indent}<h1 className="post-title"${styleAttr}>{item?.title}</h1>`;
 
       case 'post-featured-image':
         return `${indent}<img src={item?.featuredImage} alt={item?.title ?? ''} className="post-featured-image"${styleAttr} />`;
 
       case 'post-content':
-        return `${indent}<div className="post-content"{styleAttr}>{renderRichTextChildren(item?.content ?? '', "post-content")}</div>`;
+        return `${indent}<div className="post-content"${styleAttr}>{renderRichTextChildren(item?.content ?? '', "post-content")}</div>`;
 
       case 'post-excerpt':
-        return `${indent}<p className="post-excerpt"{styleAttr}>{renderRichTextChildren(item?.excerpt ?? '', "post-excerpt")}</p>`;
+        return `${indent}<p className="post-excerpt"${styleAttr}>{renderRichTextChildren(item?.excerpt ?? '', "post-excerpt")}</p>`;
 
       case 'post-date':
         return this.renderBlockTreePostDate(node, depth);
@@ -2281,7 +2414,11 @@ export default ${componentName};`;
         return this.renderBlockTreePostAuthorName(node, depth);
 
       case 'post-terms':
-        return this.renderBlockTreePostTerms(node, depth);
+        return this.renderBlockTreePostTerms(
+          node,
+          depth,
+          this.findPostTermsSectionForBlockNode(node, plan)?.taxonomy,
+        );
 
       case 'post-meta':
         return `${indent}<div className="post-meta"${styleAttr}>
@@ -2429,7 +2566,7 @@ ${indent}</div>`;
     return `${indent}<div${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>
 ${indent}  <ul className="flex flex-col gap-2">
 ${indent}    {(() => {
-${indent}      const categoryMap = new Map<string, { name: string; slug: string; count: number }>();
+${indent}      const categoryMap = new Map();
 ${indent}      posts.forEach((post) => {
 ${indent}        (post.categories ?? []).forEach((name, index) => {
 ${indent}          const slug = post.categorySlugs?.[index] ?? '';
@@ -2475,7 +2612,7 @@ ${indent}</div>`;
     return `${indent}<div${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>
 ${indent}  <div className="flex flex-wrap gap-2">
 ${indent}    {(() => {
-${indent}      const tagMap = new Map<string, number>();
+${indent}      const tagMap = new Map();
 ${indent}      posts.forEach((post) => {
 ${indent}        (post.tags ?? []).forEach((tag) => {
 ${indent}          const key = String(tag ?? '').trim();
@@ -2532,18 +2669,19 @@ ${indent}) : null}`;
     return `${indent}<span${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>{metaSource?.author}</span>`;
   }
 
-  private renderBlockTreePostTerms(node: BlockNode, depth: number): string {
+  private renderBlockTreePostTerms(
+    node: BlockNode,
+    depth: number,
+    plannedTaxonomy?: PostTermsSection['taxonomy'],
+  ): string {
     const indent = '  '.repeat(depth + 3);
-    const taxonomy = (
-      this.blockNodeStringAttr(node, 'term') ?? 'category'
-    ).toLowerCase();
+    const taxonomy =
+      plannedTaxonomy ?? this.inferBlockTreePostTermsTaxonomy(node);
     const isCategory = taxonomy === 'category';
     const prefix = this.blockNodeStringAttr(node, 'prefix');
     const separator = this.blockNodeStringAttr(node, 'separator') ?? ', ';
-    const termsExpr = isCategory
-      ? 'metaSource?.categories'
-      : 'metaSource?.tags';
-    const slugsExpr = isCategory ? 'metaSource?.categorySlugs' : '[]';
+    const termsExpr = isCategory ? 'item?.categories' : 'item?.tags';
+    const slugsExpr = isCategory ? 'item?.categorySlugs' : '[]';
     return `${indent}{Array.isArray(${termsExpr}) && ${termsExpr}.length > 0 ? (
 ${indent}  <span${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>
 ${prefix ? `${indent}    <span>{${JSON.stringify(prefix)}}</span>\n` : ''}${indent}    {${termsExpr}.map((term, index) => (
@@ -2560,6 +2698,68 @@ ${indent}      </React.Fragment>
 ${indent}    ))}
 ${indent}  </span>
 ${indent}) : null}`;
+  }
+
+  private findPostTermsSectionForBlockNode(
+    node: BlockNode,
+    plan?: ComponentVisualPlan,
+  ): PostTermsSection | undefined {
+    const sections = plan?.sections?.filter(
+      (section): section is PostTermsSection => section.type === 'post-terms',
+    );
+    if (!sections?.length) return undefined;
+
+    const exactSourceNodeId = node.sourceRef?.sourceNodeId?.trim();
+    if (exactSourceNodeId) {
+      const exactMatch = sections.find(
+        (section) =>
+          section.sourceRef?.sourceNodeId?.trim() === exactSourceNodeId,
+      );
+      if (exactMatch) return exactMatch;
+    }
+
+    const inferredTaxonomy = this.inferBlockTreePostTermsTaxonomy(node);
+    const taxonomyMatch = sections.find(
+      (section) => section.taxonomy === inferredTaxonomy,
+    );
+    if (taxonomyMatch) return taxonomyMatch;
+
+    return sections.length === 1 ? sections[0] : undefined;
+  }
+
+  private inferBlockTreePostTermsTaxonomy(node: BlockNode): string {
+    const explicitTaxonomy = (
+      this.blockNodeStringAttr(node, 'term') ??
+      this.blockNodeStringAttr(node, 'taxonomy') ??
+      this.blockNodeStringAttr(node, 'termType')
+    )
+      ?.toLowerCase()
+      .trim();
+    if (explicitTaxonomy) {
+      if (
+        ['post_tag', 'product_tag', 'tag', 'tags'].includes(explicitTaxonomy)
+      ) {
+        return 'post_tag';
+      }
+      if (
+        ['category', 'categories', 'product_cat', 'product_category'].includes(
+          explicitTaxonomy,
+        )
+      ) {
+        return 'category';
+      }
+      return explicitTaxonomy;
+    }
+
+    const sourceNodeId = node.sourceRef?.sourceNodeId ?? '';
+    const suffixMatch = sourceNodeId.match(/\.([0-9]+)$/);
+    const ordinal = suffixMatch
+      ? Number.parseInt(suffixMatch[1] ?? '', 10)
+      : NaN;
+    if (!Number.isNaN(ordinal) && ordinal >= 2) {
+      return 'post_tag';
+    }
+    return 'category';
   }
 
   private blockNodeStringAttr(
@@ -2639,7 +2839,13 @@ ${indent}) : null}`;
       plan,
       state.usedSectionIndexes,
     );
-    if (matchedSection) {
+    if (
+      matchedSection &&
+      !this.shouldPreserveHybridBlockTreeDescendants(
+        node,
+        matchedSection.section,
+      )
+    ) {
       state.usedSectionIndexes.add(matchedSection.index);
       return this.renderSection(
         matchedSection.section,
@@ -2647,6 +2853,9 @@ ${indent}) : null}`;
         plan.componentName,
         matchedSection.index,
       );
+    }
+    if (matchedSection) {
+      state.usedSectionIndexes.add(matchedSection.index);
     }
 
     const tagName = this.blockNodeTagName(node, 'div');
@@ -2773,6 +2982,28 @@ ${indent}) : null}`;
     return null;
   }
 
+  private shouldPreserveHybridBlockTreeDescendants(
+    node: BlockNode,
+    section: SectionPlan,
+  ): boolean {
+    if (!['group', 'columns', 'column'].includes(node.kind)) return false;
+    if (['card-grid', 'testimonial'].includes(section.type)) return true;
+    if (section.type === 'sidebar' || section.type === 'search') return false;
+    if (this.blockNodeHasDescendantKind(node, 'search')) return true;
+    return (
+      this.blockNodeHasDescendantKind(node, 'latest-posts') ||
+      this.blockNodeHasDescendantKind(node, 'categories') ||
+      this.blockNodeHasDescendantKind(node, 'tag-cloud')
+    );
+  }
+
+  private blockNodeHasDescendantKind(node: BlockNode, kind: string): boolean {
+    return (node.children ?? []).some(
+      (child) =>
+        child.kind === kind || this.blockNodeHasDescendantKind(child, kind),
+    );
+  }
+
   private isSidebarBlockNode(node: BlockNode): boolean {
     if (
       [
@@ -2882,15 +3113,31 @@ ${indent}) : null}`;
     const parts: string[] = [];
     const preferSemanticDeterministicPartial =
       this.shouldPreferSemanticDeterministicPartial(plan);
+    const hasBlockTree = (plan.blockTree?.length ?? 0) > 0;
+    const hasSections = (plan.sections?.length ?? 0) > 0;
+
+    if (hasBlockTree && !hasSections) {
+      return this.renderBlockTree(
+        plan.blockTree ?? [],
+        ctx,
+        plan.componentName,
+        plan,
+      );
+    }
 
     if (
       !preferSemanticDeterministicPartial &&
       plan.renderMode === 'block-centric' &&
-      plan.blockTree?.length
+      hasBlockTree
     ) {
-      return this.renderBlockTree(plan.blockTree, ctx, plan.componentName);
+      return this.renderBlockTree(
+        plan.blockTree ?? [],
+        ctx,
+        plan.componentName,
+        plan,
+      );
     }
-    if (!preferSemanticDeterministicPartial && plan.blockTree?.length) {
+    if (!preferSemanticDeterministicPartial && hasBlockTree) {
       return this.renderHybridSections(plan, ctx);
     }
 
@@ -2961,7 +3208,7 @@ ${indent}) : null}`;
       // semantic navbar abstraction loses theme-specific structure.
       return false;
     }
-    return ['footer', 'sidebar', 'postmeta'].includes(normalizedName);
+    return ['footer', 'postmeta'].includes(normalizedName);
   }
 
   private shouldUseBlockFaithfulPlanRenderer(
@@ -3794,6 +4041,9 @@ ${indent}) : null}`;
     const bg = s.background ?? p.surface;
     const tc = s.textColor ?? p.text;
     const sticky = s.sticky ? 'sticky top-0 z-50 ' : '';
+    const domId = s.domId?.trim()
+      ? ` id="${s.domId.trim().replace(/"/g, '&quot;')}"`
+      : '';
     const sectionStyle = this.buildBlockStyleAttr(
       navStyle,
       { ...this.extractSectionStyleBase(s) },
@@ -3884,7 +4134,7 @@ ${indent}) : null}`;
                   </li>`;
 
     return `      {/* Navbar */}
-      <header className="${sticky}bg-[${bg}] border-b border-black/10 w-full"${sectionStyle}>
+      <header${domId} className="${sticky}bg-[${bg}] border-b border-black/10 w-full"${sectionStyle}>
         <div className="${l.containerClass}">
           <div className="flex items-center justify-between py-4"${this.buildSectionGapStyleAttr(s)}>
             ${brandMarkup}
@@ -4084,6 +4334,7 @@ ${indent}) : null}`;
     const bgSrcExpr = `\`url("\${resolveAsset("${s.imageSrc}")}")\``;
     const extraStyles = [
       `backgroundImage: ${bgSrcExpr}`,
+      ...(s.background ? [`backgroundColor: '${s.background}'`] : []),
       `backgroundSize: 'cover'`,
       `backgroundPosition: 'center'`,
       ...(s.minHeight ? [`minHeight: '${s.minHeight}'`] : []),
@@ -5091,29 +5342,23 @@ ${cards}
     const subtitleMarkup = !s.subtitle
       ? ''
       : /<[a-z]/i.test(s.subtitle)
-        ? ctx.avoidDangerouslySetInnerHTML
-          ? `<p${mediaSubtitleClassName ? ` className="${mediaSubtitleClassName}"` : ''}${subtitleStyle}>{renderRichTextChildren(${JSON.stringify(s.subtitle)}, "media-text-subtitle")}</p>`
-          : `<p${mediaSubtitleClassName ? ` className="${mediaSubtitleClassName}"` : ''}${subtitleStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(s.subtitle)} }} />`
+        ? `<p${mediaSubtitleClassName ? ` className="${mediaSubtitleClassName}"` : ''}${subtitleStyle}>{renderRichTextChildren(${JSON.stringify(s.subtitle)}, "media-text-subtitle")}</p>`
         : `<p${mediaSubtitleClassName ? ` className="${mediaSubtitleClassName}"` : ''}${subtitleStyle}>${s.subtitle}</p>`;
     const headingMarkup = !s.heading
       ? ''
       : /<[a-z]/i.test(s.heading)
-        ? ctx.avoidDangerouslySetInnerHTML
-          ? `<h2 className="${mediaHeadingClassName}"${headingStyle}>{renderRichTextChildren(${JSON.stringify(s.heading)}, "media-text-heading")}</h2>`
-          : `<h2 className="${mediaHeadingClassName}"${headingStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(s.heading)} }} />`
+        ? `<h2 className="${mediaHeadingClassName}"${headingStyle}>{renderRichTextChildren(${JSON.stringify(s.heading)}, "media-text-heading")}</h2>`
         : `<h2 className="${mediaHeadingClassName}"${headingStyle}>${s.heading}</h2>`;
     const bodyMarkup = !s.body
       ? ''
       : /<[a-z]/i.test(s.body)
-        ? ctx.avoidDangerouslySetInnerHTML
-          ? `<div${mediaBodyClassName ? ` className="${mediaBodyClassName}"` : ''}${bodyStyle}>{renderRichTextChildren(${JSON.stringify(s.body)}, "media-text-body")}</div>`
-          : `<div${mediaBodyClassName ? ` className="${mediaBodyClassName}"` : ''}${bodyStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(s.body)} }} />`
+        ? `<div${mediaBodyClassName ? ` className="${mediaBodyClassName}"` : ''}${bodyStyle}>{renderRichTextChildren(${JSON.stringify(s.body)}, "media-text-body")}</div>`
         : `<p${mediaBodyClassName ? ` className="${mediaBodyClassName}"` : ''}${bodyStyle}>${s.body}</p>`;
     const textEl = `<div className="${itemWrapper} flex flex-col gap-4 ${this.presentationItemsAlignClass(presentation.itemsAlign)} ${this.presentationTextAlignClass(presentation.textAlign)}"${this.presentationMaxWidthStyleAttr(presentation)}>
             ${subtitleMarkup}
             ${headingMarkup}
             ${bodyMarkup}
-            ${s.listItems ? `<ul className="flex flex-col gap-2">${s.listItems.map((li, index) => (/<[a-z]/i.test(li) ? (ctx.avoidDangerouslySetInnerHTML ? `<li className="font-medium"${listItemStyle}>{renderRichTextChildren(${JSON.stringify(li)}, "media-text-list-${index}")}</li>` : `<li className="font-medium"${listItemStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(li)} }} />`) : `<li className="font-medium"${listItemStyle}>${li}</li>`)).join('')}</ul>` : ''}
+            ${s.listItems ? `<ul className="flex flex-col gap-2">${s.listItems.map((li, index) => (/<[a-z]/i.test(li) ? `<li className="font-medium"${listItemStyle}>{renderRichTextChildren(${JSON.stringify(li)}, "media-text-list-${index}")}</li>` : `<li className="font-medium"${listItemStyle}>${li}</li>`)).join('')}</ul>` : ''}
             ${cta}
           </div>`;
 
@@ -5726,8 +5971,8 @@ ${this.renderProseBlockInner(s, ctx)}
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
         <div className="${l.containerClass}">
           ${s.title ? `<h2 className="${this.appendStyledTextAlignClass(`${t.h2} font-normal text-[${tc}] mb-6`, undefined, presentation.textAlign)}"${titleStyle}>${s.title}</h2>` : ''}
-          <form role="search" className="flex gap-2" onSubmit={(event) => event.preventDefault()}>
-            <input type="search" placeholder="Search..." className="flex-1 ${t.buttonRadius}"${searchControlStyle} />
+          <form role="search" className="flex gap-2" action="/search" method="get">
+            <input type="search" name="s" placeholder="Search..." className="flex-1 ${t.buttonRadius}"${searchControlStyle} />
             <button type="submit" className="bg-[${p.accent}] text-[${p.accentText}] px-4 py-2 ${t.buttonRadius} hover:opacity-90"${this.buttonStyleAttr(ctx)}>Search</button>
           </form>
           ${cta}
@@ -5942,9 +6187,7 @@ ${mainMarkup}
     const metaBlock = hasMeta
       ? `<div className="flex flex-wrap gap-3 text-sm text-[${p.textMuted}]">\n                ${metaParts.join('\n                ')}\n              </div>`
       : '';
-    const bodyMarkup = ctx.avoidDangerouslySetInnerHTML
-      ? `<div className="prose max-w-none">{renderRichTextChildren(item.content, "post-content")}</div>`
-      : `<div className="prose max-w-none" dangerouslySetInnerHTML={{ __html: item.content }} />`;
+    const bodyMarkup = `<div className="prose max-w-none">{renderRichTextChildren(item.content, "post-content")}</div>`;
 
     return `          {item && (
             <article className="flex flex-col gap-6"${this.buildSectionGapStyleAttr(s)}>
@@ -5964,9 +6207,7 @@ ${mainMarkup}
     const bodyClass = this.buildPageContentBodyClass(s, ctx);
     const titleWrapperClass =
       s.shellVariant === 'wide' ? this.contentContainerClass(ctx) : '';
-    const bodyMarkup = ctx.avoidDangerouslySetInnerHTML
-      ? `<div className="${bodyClass}">{renderRichTextChildren(item.content, "page-content")}</div>`
-      : `<div className="${bodyClass}" dangerouslySetInnerHTML={{ __html: item.content }} />`;
+    const bodyMarkup = `<div className="${bodyClass}">{renderRichTextChildren(item.content, "page-content")}</div>`;
     return `          {item && (
              <article className="flex flex-col gap-6"${this.buildSectionGapStyleAttr(s)}>
                ${s.showTitle ? `${titleWrapperClass ? `<div className="${titleWrapperClass}">` : ''}<h1 className="${t.h1} font-normal text-[${tc}]">{item.title}</h1>${titleWrapperClass ? `</div>` : ''}` : ''}
@@ -6026,13 +6267,8 @@ ${segments}
           segment.style ? this.blueprintTypographyStyleAttr(segment.style) : '',
         );
         if (segment.html && /<[^>]+>/.test(segment.html)) {
-          if (ctx.avoidDangerouslySetInnerHTML) {
-            return `            <div className="${segmentContainerClass}">
-              <${tag} className="${headingClass}"${headingStyle}>{renderRichTextChildren(${JSON.stringify(segment.html)}, "${section.debugKey ?? section.sectionKey ?? 'prose-heading'}")}</${tag}>
-            </div>`;
-          }
           return `            <div className="${segmentContainerClass}">
-              <${tag} className="${headingClass}"${headingStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(segment.html)} }} />
+              <${tag} className="${headingClass}"${headingStyle}>{renderRichTextChildren(${JSON.stringify(segment.html)}, "${section.debugKey ?? section.sectionKey ?? 'prose-heading'}")}</${tag}>
             </div>`;
         }
         return `            <div className="${segmentContainerClass}">
@@ -6048,13 +6284,8 @@ ${segments}
           ),
           segment.style ? this.blueprintTypographyStyleAttr(segment.style) : '',
         );
-        if (ctx.avoidDangerouslySetInnerHTML) {
-          return `            <div className="${segmentContainerClass}">
-              <div className="${bodyBaseClass}"${paragraphStyle}>{renderRichTextChildren(${JSON.stringify(segment.html)}, "${section.debugKey ?? section.sectionKey ?? 'prose-paragraph'}")}</div>
-            </div>`;
-        }
         return `            <div className="${segmentContainerClass}">
-              <div className="${bodyBaseClass}"${paragraphStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(segment.html)} }} />
+              <div className="${bodyBaseClass}"${paragraphStyle}>{renderRichTextChildren(${JSON.stringify(segment.html)}, "${section.debugKey ?? section.sectionKey ?? 'prose-paragraph'}")}</div>
             </div>`;
       }
       case 'image': {
@@ -6097,9 +6328,7 @@ ${segments}
                 ${segment.items
                   .map((item) =>
                     /<[a-z]/i.test(item)
-                      ? ctx.avoidDangerouslySetInnerHTML
-                        ? `<li className="${itemClass}">{renderRichTextChildren(${JSON.stringify(item)}, "${section.debugKey ?? section.sectionKey ?? 'prose-list'}")}</li>`
-                        : `<li className="${itemClass}" dangerouslySetInnerHTML={{ __html: ${JSON.stringify(item)} }} />`
+                      ? `<li className="${itemClass}">{renderRichTextChildren(${JSON.stringify(item)}, "${section.debugKey ?? section.sectionKey ?? 'prose-list'}")}</li>`
                       : `<li className="${itemClass}">${item}</li>`,
                   )
                   .join('\n                ')}
@@ -6112,13 +6341,8 @@ ${segments}
           { baseColor: tc },
           this.pickBlockStyle(ctx, 'paragraph'),
         );
-        if (ctx.avoidDangerouslySetInnerHTML) {
-          return `            <div className="${segmentContainerClass}">
-              <div className="${bodyBaseClass}"${htmlStyle}>{renderRichTextChildren(${JSON.stringify(segment.html)}, "${section.debugKey ?? section.sectionKey ?? 'prose-html'}")}</div>
-            </div>`;
-        }
         return `            <div className="${segmentContainerClass}">
-              <div className="${bodyBaseClass}"${htmlStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(segment.html)} }} />
+              <div className="${bodyBaseClass}"${htmlStyle}>{renderRichTextChildren(${JSON.stringify(segment.html)}, "${section.debugKey ?? section.sectionKey ?? 'prose-html'}")}</div>
             </div>`;
       }
     }
@@ -6203,8 +6427,8 @@ ${
     ? `              <h3 className="${t.h3} font-normal text-[${p.text}]"${headingStyle}>${widget.title}</h3>
 `
     : ''
-}              <form role="search" className="flex gap-2" onSubmit={(event) => event.preventDefault()}>
-                <input type="search" placeholder=${placeholder} className="min-w-0 flex-1 ${t.buttonRadius}"${searchControlStyle} />
+}              <form role="search" className="flex gap-2" action="/search" method="get">
+                <input type="search" name="s" placeholder=${placeholder} className="min-w-0 flex-1 ${t.buttonRadius}"${searchControlStyle} />
                 <button type="submit" className="bg-[${p.accent}] px-4 py-2 text-[${p.accentText}] ${t.buttonRadius} hover:opacity-90"${this.buttonStyleAttr(ctx)}>${buttonLabel}</button>
               </form>
             </section>`;
@@ -6248,7 +6472,7 @@ ${
     : ''
 }              <ul className="flex flex-col gap-2 text-sm text-[${p.textMuted}]">
                 {(() => {
-                  const categoryMap = new Map<string, { name: string; slug: string; count: number }>();
+                  const categoryMap = new Map();
                   posts.forEach((post) => {
                     (post.categories ?? []).forEach((name, index) => {
                       const slug = post.categorySlugs?.[index] ?? '';
@@ -6284,7 +6508,7 @@ ${
     : ''
 }              <div className="flex flex-wrap gap-2 text-sm text-[${p.textMuted}]">
                  {(() => {
-                   const tagMap = new Map<string, number>();
+                   const tagMap = new Map();
                    posts.forEach((post) => {
                      (post.tags ?? []).forEach((tag) => {
                        const key = String(tag ?? '').trim();
@@ -6557,10 +6781,7 @@ ${indent}) : null}`;
         const level = Math.min(Math.max(node.level ?? 2, 1), 6);
         const tag = `h${level}`;
         if (node.html && !node.text) {
-          if (ctx.avoidDangerouslySetInnerHTML) {
-            return `${indent}<${tag}${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'heading'))}>{renderRichTextChildren(${JSON.stringify(node.html)}, "${node.sourceRef?.sourceNodeId ?? 'heading'}")}</${tag}>`;
-          }
-          return `${indent}<${tag}${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'heading'))} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(node.html)} }} />`;
+          return `${indent}<${tag}${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'heading'))}>{renderRichTextChildren(${JSON.stringify(this.unwrapRichTextBlockHtml(node.html, ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']))}, "${node.sourceRef?.sourceNodeId ?? 'heading'}")}</${tag}>`;
         }
         return `${indent}<${tag}${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'heading'))}>
 ${childIndent}${node.text ?? ''}
@@ -6568,10 +6789,7 @@ ${indent}</${tag}>`;
       }
       case 'paragraph': {
         if (node.html && !node.text) {
-          if (ctx.avoidDangerouslySetInnerHTML) {
-            return `${indent}<p${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'paragraph'))}>{renderRichTextChildren(${JSON.stringify(node.html)}, "${node.sourceRef?.sourceNodeId ?? 'paragraph'}")}</p>`;
-          }
-          return `${indent}<p${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'paragraph'))} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(node.html)} }} />`;
+          return `${indent}<p${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'paragraph'))}>{renderRichTextChildren(${JSON.stringify(this.unwrapRichTextBlockHtml(node.html, ['p']))}, "${node.sourceRef?.sourceNodeId ?? 'paragraph'}")}</p>`;
         }
         return `${indent}<p${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'paragraph'))}>
 ${childIndent}${node.text ?? ''}
@@ -6684,10 +6902,7 @@ ${children}
 ${indent}</div>`;
         }
         if (node.html) {
-          if (ctx.avoidDangerouslySetInnerHTML) {
-            return `${indent}<div${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, block))}>{renderRichTextChildren(${JSON.stringify(node.html)}, "${node.sourceRef?.sourceNodeId ?? block}")}</div>`;
-          }
-          return `${indent}<div${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, block))} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(node.html)} }} />`;
+          return `${indent}<div${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, block))}>{renderRichTextChildren(${JSON.stringify(node.html)}, "${node.sourceRef?.sourceNodeId ?? block}")}</div>`;
         }
         if (node.text) {
           return `${indent}<span${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, block))}>${node.text}</span>`;
@@ -7211,9 +7426,7 @@ ${indent}</ul>`;
       ? `\n                  <h3 className="${this.appendStyledTextAlignClass(`${t.h2} font-semibold tracking-[-0.02em]`, s.headingCustomClassNames, s.presentation?.textAlign)}"${headingTextStyle}>{${JSON.stringify(s.heading)}}</h3>`
       : '';
     const bodyPart = s.body
-      ? ctx.avoidDangerouslySetInnerHTML
-        ? `\n                  <div className="${this.appendStyledTextAlignClass(`${t.body} leading-7`, s.bodyCustomClassNames, s.presentation?.textAlign)}"${bodyTextStyle}>{renderRichTextChildren(${JSON.stringify(s.body)}, "modal-body")}</div>`
-        : `\n                  <div className="${this.appendStyledTextAlignClass(`${t.body} leading-7`, s.bodyCustomClassNames, s.presentation?.textAlign)}"${bodyTextStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(s.body)} }} />`
+      ? `\n                  <div className="${this.appendStyledTextAlignClass(`${t.body} leading-7`, s.bodyCustomClassNames, s.presentation?.textAlign)}"${bodyTextStyle}>{renderRichTextChildren(${JSON.stringify(s.body)}, "modal-body")}</div>`
       : '';
     const ctaPart = this.renderInteractiveAnchorCtaGroup(
       this.resolveSectionCtas(s),
@@ -7449,9 +7662,7 @@ ${indent}</ul>`;
           ? `\n                <h3 className="${this.appendStyledTextAlignClass(`${t.h3} font-semibold`, tab.headingCustomClassNames, 'left')}"${panelHeadingStyle}>{${JSON.stringify(tab.heading)}}</h3>`
           : '';
         const bodyPart = tab.body
-          ? ctx.avoidDangerouslySetInnerHTML
-            ? `\n                <div className="${this.appendStyledTextAlignClass(`${t.body} leading-7`, tab.bodyCustomClassNames, 'left')}"${panelBodyStyle}>{renderRichTextChildren(${JSON.stringify(tab.body)}, "${domKey}-tab-body-${index}")}</div>`
-            : `\n                <div className="${this.appendStyledTextAlignClass(`${t.body} leading-7`, tab.bodyCustomClassNames, 'left')}"${panelBodyStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(tab.body)} }} />`
+          ? `\n                <div className="${this.appendStyledTextAlignClass(`${t.body} leading-7`, tab.bodyCustomClassNames, 'left')}"${panelBodyStyle}>{renderRichTextChildren(${JSON.stringify(tab.body)}, "${domKey}-tab-body-${index}")}</div>`
           : '';
         const imagePart = tab.imageSrc
           ? `\n                <img src={resolveAsset(${JSON.stringify(tab.imageSrc)})} alt={${JSON.stringify(tab.imageAlt ?? '')}} className="${this.appendOptionalCustomClasses(`vp-uagb-tabs__media-image ${imageRadius}`, tab.imageCustomClassNames)}"${imageStyle} />`
@@ -7643,7 +7854,7 @@ ${panels}
             </button>
             {((${openStateExpr}).includes(${index})) ? (
               <div id="${domKey}-panel-${index}" className="uagb-faq-content vp-uagb-faq__content">
-                ${ctx.avoidDangerouslySetInnerHTML ? `<div className="${this.appendStyledTextAlignClass(`${t.body} leading-7`, item.bodyCustomClassNames, 'left')}"${itemBodyStyle}>{renderRichTextChildren(${JSON.stringify(item.body)}, "${domKey}-accordion-body-${index}")}</div>` : `<div className="${this.appendStyledTextAlignClass(`${t.body} leading-7`, item.bodyCustomClassNames, 'left')}"${itemBodyStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(item.body)} }} />`}
+                <div className="${this.appendStyledTextAlignClass(`${t.body} leading-7`, item.bodyCustomClassNames, 'left')}"${itemBodyStyle}>{renderRichTextChildren(${JSON.stringify(item.body)}, "${domKey}-accordion-body-${index}")}</div>
               </div>
             ) : null}
             </div>
