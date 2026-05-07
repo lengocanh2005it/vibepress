@@ -167,6 +167,10 @@ function getUsefulParamKeysForBlock(blockName: string): Set<string> {
   const keys = new Set(BASE_USEFUL_PARAM_KEYS);
   if (
     [
+      'social-link',
+      'core/social-link',
+      'social-links',
+      'core/social-links',
       'uagb/slider',
       'uagb/modal',
       'uagb/tabs',
@@ -210,6 +214,11 @@ function getUsefulParamKeysForBlock(blockName: string): Set<string> {
       'enableToggle',
       'allowMultipleOpen',
       'multiOpen',
+      'url',
+      'service',
+      'iconColor',
+      'iconColorValue',
+      'size',
     ]) {
       keys.add(key);
     }
@@ -621,29 +630,29 @@ function parseBlocks(markup: string): WpNode[] {
     if (selfClosing) {
       // navigation-link: lift label/url to semantic fields so AI can use them as static links
       if (blockName === 'navigation-link' && params?.label) {
-        nodes.push(
-          compact({
-            block: 'navigation-link',
-            text: params.label as string,
-            href: canonicalizeThemeAssetReference(params.url as string) || '#',
-            ...(normalizeDomId(params?.anchor)
-              ? { domId: normalizeDomId(params?.anchor) }
-              : {}),
-          }),
-        );
+        const node = compact({
+          block: 'navigation-link',
+          text: params.label as string,
+          href: canonicalizeThemeAssetReference(params.url as string) || '#',
+          ...(normalizeDomId(params?.anchor)
+            ? { domId: normalizeDomId(params?.anchor) }
+            : {}),
+        }) as WpNode;
+        liftBlockParamHints(node, blockName, params);
+        nodes.push(node);
       } else {
-        nodes.push(
-          compact({
-            block: blockName,
-            params,
-            ...(normalizeDomId(params?.anchor)
-              ? { domId: normalizeDomId(params?.anchor) }
-              : {}),
-            ...(blockName === 'site-logo' && params?.width
-              ? { width: Number(params.width) }
-              : {}),
-          }),
-        );
+        const node = compact({
+          block: blockName,
+          params,
+          ...(normalizeDomId(params?.anchor)
+            ? { domId: normalizeDomId(params?.anchor) }
+            : {}),
+          ...(blockName === 'site-logo' && params?.width
+            ? { width: Number(params.width) }
+            : {}),
+        }) as WpNode;
+        liftBlockParamHints(node, blockName, params);
+        nodes.push(node);
       }
       continue;
     }
@@ -759,6 +768,63 @@ function parseBlocks(markup: string): WpNode[] {
   }
 
   return nodes;
+}
+
+function liftBlockParamHints(
+  node: WpNode,
+  blockName: string,
+  params: Record<string, any> | undefined,
+): void {
+  if (!params) return;
+
+  if (params.backgroundColor) node.bgColor = params.backgroundColor as string;
+  if (params.textColor) node.textColor = params.textColor as string;
+  if (params.style?.color?.background && !node.bgColor) {
+    node.bgColor = params.style.color.background as string;
+  }
+  if (params.style?.color?.text && !node.textColor) {
+    node.textColor = params.style.color.text as string;
+  }
+
+  const borderRadius = normalizeBorderRadius(params.style?.border?.radius);
+  if (borderRadius) node.borderRadius = borderRadius;
+
+  const gap = normalizeGapValue(params.style?.spacing?.blockGap ?? params.gap);
+  if (gap) node.gap = gap;
+
+  const normalizedPadding = normalizeBoxSpacing(params.style?.spacing?.padding);
+  if (normalizedPadding) node.padding = normalizedPadding;
+
+  const normalizedMargin = normalizeBoxSpacing(params.style?.spacing?.margin);
+  if (normalizedMargin) node.margin = normalizedMargin;
+
+  if (params.minHeight) node.minHeight = normalizeCssLength(params.minHeight);
+  if (params.overlayColor) node.overlayColor = params.overlayColor as string;
+  if (blockName === 'column' && params.width) node.columnWidth = params.width;
+  if (params.textAlign && !node.textAlign) node.textAlign = params.textAlign;
+  if (params.align) node.align = params.align;
+  if (params.fontFamily) node.fontFamily = params.fontFamily;
+
+  const typo = params.style?.typography;
+  if (typo || params.fontSize) {
+    const typography: WpNode['typography'] = {};
+    if (typo?.letterSpacing) typography.letterSpacing = typo.letterSpacing;
+    if (typo?.textTransform) typography.textTransform = typo.textTransform;
+    if (typo?.lineHeight) typography.lineHeight = typo.lineHeight;
+    if (typo?.fontSize) typography.fontSize = typo.fontSize;
+    else if (params.fontSize) {
+      typography.fontSize = `var:preset|font-size|${String(params.fontSize)}`;
+    }
+    if (typo?.fontWeight) typography.fontWeight = typo.fontWeight;
+    if (typo?.fontFamily) typography.fontFamily = typo.fontFamily;
+    if (Object.keys(typography).length > 0) node.typography = typography;
+  }
+
+  const customClassNames = extractUsefulCustomClassNames([
+    ...(extractUsefulCustomClassNamesFromParam(params.className) ?? []),
+    ...(node.customClassNames ?? []),
+  ]);
+  if (customClassNames.length > 0) node.customClassNames = customClassNames;
 }
 
 /**

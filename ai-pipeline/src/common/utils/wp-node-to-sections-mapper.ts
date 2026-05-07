@@ -974,6 +974,11 @@ function mapGroup(node: WpNode, _siblings: WpNode[]): SectionPlan[] {
     if (testimonial) return toMappedSections(testimonial, node);
   }
 
+  const sidebarWidgetSection = buildSidebarWidgetGroup(node, children);
+  if (sidebarWidgetSection) {
+    return toMappedSections(sidebarWidgetSection, node);
+  }
+
   const accordionSection = buildAccordionFromGroup(node, children);
   if (accordionSection) {
     return toMappedSections(accordionSection, node);
@@ -1781,6 +1786,71 @@ function buildPostNavigationSection(
     previousLabel: overrides.previousLabel ?? 'Previous:',
     nextLabel: overrides.nextLabel ?? 'Next:',
   };
+}
+
+function buildSidebarWidgetGroup(
+  node: WpNode,
+  children: WpNode[],
+): SidebarSection | null {
+  const flat = flattenChildren(node);
+  const widgetNodes = flat.filter((child) => isSidebarCollectionWidget(child));
+  if (widgetNodes.length !== 1) return null;
+
+  const widgetNode = widgetNodes[0]!;
+  const widget = sidebarWidgetFromNode(widgetNode);
+  if (!widget) return null;
+
+  const heading = findFirstByBlock(children, ['core/heading', 'heading']);
+  const title = extractNodeText(heading ?? widgetNode);
+  if (title) widget.title = title;
+
+  const section: SidebarSection = {
+    type: 'sidebar',
+    ...(title ? { title } : {}),
+    widgets: [widget],
+  };
+
+  const maxItems = Number(widgetNode.params?.postsToShow);
+  if (Number.isFinite(maxItems) && maxItems > 0) {
+    section.maxItems = maxItems;
+  }
+  if (node.customClassNames?.length) {
+    section.customClassNames = uniqueClassNames(node.customClassNames);
+  }
+
+  return section;
+}
+
+function isSidebarCollectionWidget(node: WpNode): boolean {
+  return [
+    'core/latest-posts',
+    'latest-posts',
+    'core/categories',
+    'categories',
+    'core/tag-cloud',
+    'tag-cloud',
+  ].includes(node.block);
+}
+
+function sidebarWidgetFromNode(
+  node: WpNode,
+): SidebarSection['widgets'][number] | null {
+  switch (node.block) {
+    case 'core/latest-posts':
+    case 'latest-posts':
+      return { kind: 'recent-posts' };
+    case 'core/categories':
+    case 'categories':
+      return {
+        kind: 'categories',
+        ...(node.params?.showPostCounts ? { showCounts: true } : {}),
+      };
+    case 'core/tag-cloud':
+    case 'tag-cloud':
+      return { kind: 'tags' };
+    default:
+      return null;
+  }
 }
 
 // ── standalone heading / quote ──────────────────────────────────────────────
@@ -3592,6 +3662,13 @@ function buildMediaTextFromColumns(
   const imageCoverNode = imageFlat.find(
     (c) => c.block === 'core/cover' || c.block === 'cover',
   );
+  const nestedCoverImageNode = imageCoverNode
+    ? findFirstByBlock(flattenChildren(imageCoverNode), ['core/image', 'image'])
+    : undefined;
+  const visualImageNode = nestedCoverImageNode?.src
+    ? nestedCoverImageNode
+    : imgNode;
+  const visualImageSrc = (visualImageNode.src ?? imgNode.src) as string;
   const textFlat = imgInFirst ? flat1 : flat0;
   const h = textFlat.find(
     (c) => c.block === 'core/heading' || c.block === 'heading',
@@ -3603,12 +3680,14 @@ function buildMediaTextFromColumns(
 
   const s: MediaTextSection = {
     type: 'media-text',
-    imageSrc: imgNode.src,
-    imageAlt: imgNode.alt ?? '',
+    imageSrc: visualImageSrc,
+    imageAlt: visualImageNode.alt ?? '',
     imagePosition: imgInFirst ? 'left' : 'right',
-    ...(imgNode.customClassNames?.length
+    ...(visualImageNode.customClassNames?.length
       ? {
-          imageCustomClassNames: uniqueClassNames(imgNode.customClassNames),
+          imageCustomClassNames: uniqueClassNames(
+            visualImageNode.customClassNames,
+          ),
         }
       : {}),
     ...(imageCoverNode?.borderRadius
@@ -3723,8 +3802,12 @@ const SIDEBAR_WIDGET_BLOCKS = new Set<string>([
   'template-part',
   'core/search',
   'search',
+  'core/latest-posts',
+  'latest-posts',
   'core/categories',
   'categories',
+  'core/tag-cloud',
+  'tag-cloud',
   'core/avatar',
   'avatar',
   'core/navigation',

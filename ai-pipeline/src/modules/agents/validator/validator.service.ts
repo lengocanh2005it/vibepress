@@ -310,8 +310,45 @@ export class ValidatorService {
     code = normalizeCanonicalPostMetaAndTextLinks(code);
     code = normalizeThemeAssetReferences(code);
     code = normalizeCommonTypographyTypos(code);
+    code = this.sanitizeScrollTopHookClasses(code);
     code = ensureReactRouterLinkImport(code);
     return code;
+  }
+
+  private sanitizeScrollTopHookClasses(raw: string): string {
+    const hookClass = 'profolio-fse-scroll-top';
+    const hookPattern = new RegExp(`\\b${hookClass}\\b`);
+
+    return raw.replace(
+      /<([A-Za-z][A-Za-z0-9.]*)\b([^<>]*?)\bclassName=(["'])([^"']*)\3/g,
+      (match, rawTag: string, beforeClass: string, quote: string, classValue: string) => {
+        if (!hookPattern.test(classValue)) return match;
+
+        const tag = rawTag.split('.').pop()?.toLowerCase() ?? rawTag.toLowerCase();
+        const isScrollTopTriggerTag =
+          tag === 'p' || tag === 'a' || tag === 'button';
+        const classNames = classValue.split(/\s+/).filter(Boolean);
+        const isDedicatedTrigger =
+          classNames.length > 0 &&
+          classNames.every(
+            (className) =>
+              className === hookClass ||
+              className.startsWith('wp-block-') ||
+              className.startsWith('has-'),
+          );
+
+        if (isScrollTopTriggerTag && isDedicatedTrigger) return match;
+
+        const cleanedClassValue = classNames
+          .filter((className) => className !== hookClass)
+          .join(' ');
+        if (!cleanedClassValue) {
+          return `<${rawTag}${beforeClass.trimEnd()}`;
+        }
+
+        return `<${rawTag}${beforeClass}className=${quote}${cleanedClassValue}${quote}`;
+      },
+    );
   }
 
   /**

@@ -10,6 +10,11 @@ export const SOURCE_MOTION_BRIDGE_CSS = String.raw`@layer components {
     cursor: pointer;
   }
 
+  .profolio-fse-scroll-top:not(p):not(a):not(button)::before {
+    content: none !important;
+    display: none !important;
+  }
+
   .wow,
   .vp-source-reveal {
     will-change: opacity, transform;
@@ -359,7 +364,18 @@ function startSourceThemeInteractionBridge() {
       document.querySelectorAll<HTMLElement>(SOURCE_SCROLL_TOP_SELECTOR),
     ).filter((element) => isEligibleScrollTopElement(element));
 
+  const removeLeakedScrollTopHooks = () => {
+    document
+      .querySelectorAll<HTMLElement>(SOURCE_SCROLL_TOP_SELECTOR)
+      .forEach((element) => {
+        if (isEligibleScrollTopElement(element)) return;
+        element.classList.remove('profolio-fse-scroll-top');
+        element.removeAttribute('data-vp-scroll-top-bound');
+      });
+  };
+
   const updateScrollTopVisibility = () => {
+    removeLeakedScrollTopHooks();
     const shouldShow = window.scrollY > 100;
     for (const element of getScrollTopElements()) {
       bindScrollTop(element);

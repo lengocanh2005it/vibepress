@@ -659,9 +659,11 @@ export class CodeGeneratorService {
         case 'avatar':
         case 'categories':
         case 'tag-cloud':
-        case 'query':
         case 'latest-posts':
           needs.add('posts');
+          break;
+        case 'query':
+          needs.add(this.blockTreeQueryUsesProducts(node) ? 'products' : 'posts');
           break;
         case 'post-author-biography':
           needs.add('siteInfo');
@@ -671,6 +673,29 @@ export class CodeGeneratorService {
         this.collectBlockTreeDataNeeds(node.children, needs);
       }
     }
+  }
+
+  private blockTreeQueryUsesProducts(node: BlockNode): boolean {
+    const stack = [...(node.children ?? [])];
+    while (stack.length > 0) {
+      const current = stack.pop()!;
+      if (
+        [
+          'product-image',
+          'product-price',
+          'product-button',
+          'product-rating',
+          'product-sku',
+          'add-to-cart-form',
+          'products',
+        ].includes(current.kind)
+      ) {
+        return true;
+      }
+      if (current.blockName?.startsWith('woocommerce/product')) return true;
+      stack.push(...(current.children ?? []));
+    }
+    return false;
   }
 
   // ── Imports ───────────────────────────────────────────────────────────────
@@ -856,6 +881,28 @@ export class CodeGeneratorService {
     );
     lines.push(`  ]);`);
     lines.push(
+      `  const parseRichTextStyle = (value: string | null): React.CSSProperties | undefined => {`,
+    );
+    lines.push(`    if (!value) return undefined;`);
+    lines.push(
+      `    const allowed = new Set(['backgroundColor', 'color', 'fontStyle', 'fontWeight', 'textDecoration']);`,
+    );
+    lines.push(`    const style: React.CSSProperties = {};`);
+    lines.push(`    value.split(';').forEach((entry) => {`);
+    lines.push(`      const [rawKey, ...rawValue] = entry.split(':');`);
+    lines.push(`      const cssValue = rawValue.join(':').trim();`);
+    lines.push(`      if (!rawKey || !cssValue) return;`);
+    lines.push(
+      `      const key = rawKey.trim().replace(/-([a-z])/g, (_match, letter: string) => letter.toUpperCase());`,
+    );
+    lines.push(`      if (!allowed.has(key)) return;`);
+    lines.push(`      (style as Record<string, string>)[key] = cssValue;`);
+    lines.push(`    });`);
+    lines.push(
+      `    return Object.keys(style).length > 0 ? style : undefined;`,
+    );
+    lines.push(`  };`);
+    lines.push(
       `  const renderRichTextNode = (node: ChildNode, key: string): React.ReactNode => {`,
     );
     lines.push(
@@ -869,6 +916,9 @@ export class CodeGeneratorService {
     );
     lines.push(
       `    const title = element.getAttribute('title') || undefined;`,
+    );
+    lines.push(
+      `    const style = parseRichTextStyle(element.getAttribute('style'));`,
     );
     lines.push(`    const children = Array.from(element.childNodes)`);
     lines.push(
@@ -911,6 +961,7 @@ export class CodeGeneratorService {
     lines.push(`    const props: Record<string, unknown> = { key };`);
     lines.push(`    if (className) props.className = className;`);
     lines.push(`    if (title) props.title = title;`);
+    lines.push(`    if (style) props.style = style;`);
     lines.push(`    return React.createElement(`);
     lines.push(`      tag,`);
     lines.push(`      props,`);
@@ -1093,6 +1144,28 @@ export class CodeGeneratorService {
       );
       lines.push(`  ]);`);
       lines.push(
+        `  const parseRichTextStyle = (value: string | null): React.CSSProperties | undefined => {`,
+      );
+      lines.push(`    if (!value) return undefined;`);
+      lines.push(
+        `    const allowed = new Set(['backgroundColor', 'color', 'fontStyle', 'fontWeight', 'textDecoration']);`,
+      );
+      lines.push(`    const style: React.CSSProperties = {};`);
+      lines.push(`    value.split(';').forEach((entry) => {`);
+      lines.push(`      const [rawKey, ...rawValue] = entry.split(':');`);
+      lines.push(`      const cssValue = rawValue.join(':').trim();`);
+      lines.push(`      if (!rawKey || !cssValue) return;`);
+      lines.push(
+        `      const key = rawKey.trim().replace(/-([a-z])/g, (_match, letter: string) => letter.toUpperCase());`,
+      );
+      lines.push(`      if (!allowed.has(key)) return;`);
+      lines.push(`      (style as Record<string, string>)[key] = cssValue;`);
+      lines.push(`    });`);
+      lines.push(
+        `    return Object.keys(style).length > 0 ? style : undefined;`,
+      );
+      lines.push(`  };`);
+      lines.push(
         `  const renderRichTextNode = (node: ChildNode, key: string): React.ReactNode => {`,
       );
       lines.push(
@@ -1106,6 +1179,9 @@ export class CodeGeneratorService {
       );
       lines.push(
         `    const title = element.getAttribute('title') || undefined;`,
+      );
+      lines.push(
+        `    const style = parseRichTextStyle(element.getAttribute('style'));`,
       );
       lines.push(`    const children = Array.from(element.childNodes)`);
       lines.push(
@@ -1148,6 +1224,7 @@ export class CodeGeneratorService {
       lines.push(`    const props: Record<string, unknown> = { key };`);
       lines.push(`    if (className) props.className = className;`);
       lines.push(`    if (title) props.title = title;`);
+      lines.push(`    if (style) props.style = style;`);
       lines.push(`    return React.createElement(`);
       lines.push(`      tag,`);
       lines.push(`      props,`);
@@ -2436,6 +2513,12 @@ ${indent}</div>`;
       case 'comments':
         return `${indent}<div className="comments-area">{/* comments */}</div>`;
 
+      case 'cart':
+        return this.renderBlockTreeCart(node, ctx, depth);
+
+      case 'checkout':
+        return this.renderBlockTreeCheckout(node, ctx, depth);
+
       case 'template-part':
         if (node.templatePartSlug) {
           const name = node.templatePartSlug
@@ -2454,6 +2537,92 @@ ${indent}</div>`;
           ? `${indent}<div${this.blockNodeClassAttr(node, [node.kind])}${styleAttr}>${this.blockTreeTextLiteral(node.text)}</div>`
           : '';
     }
+  }
+
+  private renderBlockTreeCart(
+    node: BlockNode,
+    ctx: RenderCtx,
+    depth: number,
+  ): string {
+    const indent = '  '.repeat(depth + 3);
+    const { p, t } = ctx;
+    const shellStyle = this.blockNodeStyleAttr(node, {
+      backgroundColor: p.background,
+    });
+    return `${indent}<section${this.blockNodeClassAttr(node, ['woocommerce-cart'])}${shellStyle}>
+${indent}  <div className="${this.contentContainerClass(ctx)} py-16 lg:py-24">
+${indent}    <h1 className="${t.h1} font-normal text-[${p.text}]">Cart</h1>
+${indent}    <div className="mt-10 grid gap-8 lg:grid-cols-[minmax(0,1fr)_360px]">
+${indent}      <div className="rounded-md border border-black/10 bg-[${p.surface}] p-6">
+${indent}        <div className="grid grid-cols-[1fr_auto_auto] gap-4 border-b border-black/10 pb-4 text-sm font-semibold uppercase tracking-wide text-[${p.textMuted}]">
+${indent}          <span>Product</span>
+${indent}          <span>Quantity</span>
+${indent}          <span>Total</span>
+${indent}        </div>
+${indent}        <div className="py-8 text-[${p.textMuted}]">Your cart items will appear here.</div>
+${indent}      </div>
+${indent}      <aside className="rounded-md border border-black/10 bg-[${p.surface}] p-6">
+${indent}        <h2 className="${t.h3} font-normal text-[${p.text}]">Cart totals</h2>
+${indent}        <div className="mt-6 flex flex-col gap-3 text-[${p.text}]">
+${indent}          <div className="flex justify-between border-b border-black/10 pb-3"><span>Subtotal</span><span>-</span></div>
+${indent}          <div className="flex justify-between text-lg font-semibold"><span>Total</span><span>-</span></div>
+${indent}        </div>
+${indent}        <a className="mt-6 inline-flex w-full items-center justify-center rounded-md bg-[${p.accent}] px-5 py-3 text-[${p.accentText}]" href="/checkout">Proceed to checkout</a>
+${indent}      </aside>
+${indent}    </div>
+${indent}  </div>
+${indent}</section>`;
+  }
+
+  private renderBlockTreeCheckout(
+    node: BlockNode,
+    ctx: RenderCtx,
+    depth: number,
+  ): string {
+    const indent = '  '.repeat(depth + 3);
+    const { p, t } = ctx;
+    const shellStyle = this.blockNodeStyleAttr(node, {
+      backgroundColor: p.background,
+    });
+    return `${indent}<section${this.blockNodeClassAttr(node, ['woocommerce-checkout'])}${shellStyle}>
+${indent}  <div className="${this.contentContainerClass(ctx)} py-16 lg:py-24">
+${indent}    <h1 className="${t.h1} font-normal text-[${p.text}]">Checkout</h1>
+${indent}    <div className="mt-10 grid gap-8 lg:grid-cols-[minmax(0,1fr)_380px]">
+${indent}      <div className="flex flex-col gap-6">
+${indent}        <div className="rounded-md border border-black/10 bg-[${p.surface}] p-6">
+${indent}          <h2 className="${t.h3} font-normal text-[${p.text}]">Contact information</h2>
+${indent}          <div className="mt-4 grid gap-4 sm:grid-cols-2">
+${indent}            <label className="flex flex-col gap-2 text-sm text-[${p.textMuted}]">Email address<input className="rounded-md border border-black/15 bg-white px-3 py-3 text-[${p.text}]" /></label>
+${indent}            <label className="flex flex-col gap-2 text-sm text-[${p.textMuted}]">Phone<input className="rounded-md border border-black/15 bg-white px-3 py-3 text-[${p.text}]" /></label>
+${indent}          </div>
+${indent}        </div>
+${indent}        <div className="rounded-md border border-black/10 bg-[${p.surface}] p-6">
+${indent}          <h2 className="${t.h3} font-normal text-[${p.text}]">Shipping address</h2>
+${indent}          <div className="mt-4 grid gap-4 sm:grid-cols-2">
+${indent}            <input className="rounded-md border border-black/15 bg-white px-3 py-3 text-[${p.text}]" placeholder="First name" />
+${indent}            <input className="rounded-md border border-black/15 bg-white px-3 py-3 text-[${p.text}]" placeholder="Last name" />
+${indent}            <input className="sm:col-span-2 rounded-md border border-black/15 bg-white px-3 py-3 text-[${p.text}]" placeholder="Street address" />
+${indent}            <input className="rounded-md border border-black/15 bg-white px-3 py-3 text-[${p.text}]" placeholder="City" />
+${indent}            <input className="rounded-md border border-black/15 bg-white px-3 py-3 text-[${p.text}]" placeholder="Postcode" />
+${indent}          </div>
+${indent}        </div>
+${indent}        <div className="rounded-md border border-black/10 bg-[${p.surface}] p-6">
+${indent}          <h2 className="${t.h3} font-normal text-[${p.text}]">Payment</h2>
+${indent}          <div className="mt-4 rounded-md border border-dashed border-black/20 p-5 text-[${p.textMuted}]">Payment options are provided by WooCommerce at runtime.</div>
+${indent}        </div>
+${indent}      </div>
+${indent}      <aside className="h-fit rounded-md border border-black/10 bg-[${p.surface}] p-6">
+${indent}        <h2 className="${t.h3} font-normal text-[${p.text}]">Order summary</h2>
+${indent}        <div className="mt-6 flex flex-col gap-3 text-[${p.text}]">
+${indent}          <div className="flex justify-between border-b border-black/10 pb-3"><span>Subtotal</span><span>-</span></div>
+${indent}          <div className="flex justify-between border-b border-black/10 pb-3"><span>Shipping</span><span>-</span></div>
+${indent}          <div className="flex justify-between text-lg font-semibold"><span>Total</span><span>-</span></div>
+${indent}        </div>
+${indent}        <button className="mt-6 w-full rounded-md bg-[${p.accent}] px-5 py-3 text-[${p.accentText}]">Place order</button>
+${indent}      </aside>
+${indent}    </div>
+${indent}  </div>
+${indent}</section>`;
   }
 
   private renderBlockTreeNavigation(
@@ -6687,7 +6856,7 @@ ${
             ...this.buildBlockFaithfulBehaviorStyle(node, state),
           },
         );
-        return `${indent}<div${this.buildWpNodeAttrs(node)}${styleAttr}>
+        return `${indent}<div${this.buildWpNodeAttrs(node, 'wp-block-group')}${styleAttr}>
 ${children}
 ${indent}</div>`;
       }
@@ -6703,7 +6872,7 @@ ${indent}</div>`;
           this.pickBlockStyle(ctx, 'columns', 'group'),
           this.buildWpColumnsStyle(node),
         );
-        return `${indent}<div${this.buildWpNodeAttrs(node)}${styleAttr}>
+        return `${indent}<div${this.buildWpNodeAttrs(node, 'wp-block-columns')}${styleAttr}>
 ${children}
 ${indent}</div>`;
       }
@@ -6720,7 +6889,7 @@ ${indent}</div>`;
               }
             : {},
         );
-        return `${indent}<div${this.buildWpNodeAttrs(node)}${styleAttr}>
+        return `${indent}<div${this.buildWpNodeAttrs(node, 'wp-block-column')}${styleAttr}>
 ${children}
 ${indent}</div>`;
       }
@@ -6781,9 +6950,9 @@ ${indent}) : null}`;
         const level = Math.min(Math.max(node.level ?? 2, 1), 6);
         const tag = `h${level}`;
         if (node.html && !node.text) {
-          return `${indent}<${tag}${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'heading'))}>{renderRichTextChildren(${JSON.stringify(this.unwrapRichTextBlockHtml(node.html, ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']))}, "${node.sourceRef?.sourceNodeId ?? 'heading'}")}</${tag}>`;
+          return `${indent}<${tag}${this.buildWpNodeAttrs(node, 'wp-block-heading')}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'heading'))}>{renderRichTextChildren(${JSON.stringify(this.unwrapRichTextBlockHtml(node.html, ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']))}, "${node.sourceRef?.sourceNodeId ?? 'heading'}")}</${tag}>`;
         }
-        return `${indent}<${tag}${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'heading'))}>
+        return `${indent}<${tag}${this.buildWpNodeAttrs(node, 'wp-block-heading')}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'heading'))}>
 ${childIndent}${node.text ?? ''}
 ${indent}</${tag}>`;
       }
@@ -6832,7 +7001,7 @@ ${childIndent}${node.text ?? ''}
 ${indent}</a>`;
       }
       case 'image': {
-        const styleAttr = this.buildWpNodeStyleAttr(
+        const imageStyleAttr = this.buildWpNodeStyleAttr(
           node,
           this.pickBlockStyle(ctx, 'image', 'gallery'),
           {
@@ -6840,7 +7009,9 @@ ${indent}</a>`;
             height: node.height ? `${node.height}px` : undefined,
           },
         );
-        return `${indent}<img src={resolveAsset(${JSON.stringify(node.src ?? '')})} alt="${node.alt ?? ''}"${this.buildWpNodeAttrs(node)}${styleAttr} />`;
+        return `${indent}<figure${this.buildWpNodeAttrs(node, 'wp-block-image size-full')}>
+${childIndent}<img src={resolveAsset(${JSON.stringify(node.src ?? '')})} alt="${node.alt ?? ''}"${imageStyleAttr} />
+${indent}</figure>`;
       }
       case 'search': {
         const styleAttr = this.buildWpNodeStyleAttr(
@@ -6868,20 +7039,23 @@ ${indent}</form>`;
             gap: node.gap ?? '0.75rem',
           },
         );
-        return `${indent}<div${this.buildWpNodeAttrs(node)}${styleAttr}>
+        return `${indent}<ul${this.buildWpNodeAttrs(node, 'wp-block-social-links has-normal-icon-size has-icon-color')}${styleAttr}>
 ${children}
-${indent}</div>`;
+${indent}</ul>`;
       }
       case 'social-link': {
         const service = String(node.params?.service ?? node.text ?? 'Social');
         const href = String(node.params?.url ?? node.href ?? '').trim();
-        return href && href !== '#'
-          ? `${indent}<a href="${href}"${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'social-link'))}>
-${childIndent}${service}
-${indent}</a>`
-          : `${indent}<a href="#"${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'social-link'))}>
-${childIndent}${service}
-${indent}</a>`;
+        const serviceSlug = service
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-+|-+$/g, '');
+        const linkHref = href && href !== '#' ? href : '#';
+        return `${indent}<li${this.buildWpNodeAttrs(node, `wp-social-link wp-social-link-${serviceSlug || 'link'}`)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'social-link'))}>
+${childIndent}<a href="${linkHref}" aria-label="${service}">
+${childIndent}  <span className="wp-block-social-link-label">${service}</span>
+${childIndent}</a>
+${indent}</li>`;
       }
       case 'separator':
         return `${indent}<hr${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node)} />`;
@@ -7148,10 +7322,38 @@ ${indent}</ul>`;
   }
 
   private mergeWpNodeClassName(base: string, node: WpNode): string {
-    const classes = [...base.split(/\s+/), ...(node.customClassNames ?? [])]
+    const classes = [
+      ...base.split(/\s+/),
+      ...this.wpPresetColorClassNames(node),
+      ...(node.customClassNames ?? []),
+    ]
       .map((token) => token.trim())
       .filter(Boolean);
     return Array.from(new Set(classes)).join(' ');
+  }
+
+  private wpPresetColorClassNames(node: WpNode): string[] {
+    const classes: string[] = [];
+    const backgroundSlug = this.wpPresetColorSlug(node.bgColor);
+    if (backgroundSlug) {
+      classes.push(`has-${backgroundSlug}-background-color`, 'has-background');
+    }
+    const textSlug = this.wpPresetColorSlug(node.textColor);
+    if (textSlug) {
+      classes.push(`has-${textSlug}-color`, 'has-text-color');
+    }
+    return classes;
+  }
+
+  private wpPresetColorSlug(value?: string): string | null {
+    const normalized = value?.trim();
+    if (!normalized || this.isCssColorValue(normalized)) return null;
+    const slug = normalized
+      .toLowerCase()
+      .replace(/^var:preset\|color\|/i, '')
+      .replace(/[^a-z0-9-]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+    return slug || null;
   }
 
   private blockStyleToStyleMap(
@@ -7225,8 +7427,15 @@ ${indent}</ul>`;
       style.display = 'flex';
       style.flexDirection =
         layout.orientation === 'vertical' ? 'column' : 'row';
-      if (layout.justifyContent)
-        style.justifyContent = String(layout.justifyContent);
+      if (layout.justifyContent) {
+        const justifyContent = String(layout.justifyContent);
+        style.justifyContent =
+          justifyContent === 'right'
+            ? 'flex-end'
+            : justifyContent === 'left'
+              ? 'flex-start'
+              : justifyContent;
+      }
       if (layout.verticalAlignment)
         style.alignItems = String(layout.verticalAlignment);
       if (layout.flexWrap === false || layout.flexWrap === 'nowrap') {
@@ -7291,6 +7500,12 @@ ${indent}</ul>`;
     if (value === undefined) return undefined;
     const normalized = String(value).trim();
     if (!normalized || normalized === '[object Object]') return undefined;
+    if (
+      (key === 'backgroundColor' || key === 'color' || key === 'borderColor') &&
+      !this.isCssColorValue(normalized)
+    ) {
+      return undefined;
+    }
 
     const lengthLikeKeys = new Set([
       'width',
@@ -7326,6 +7541,14 @@ ${indent}</ul>`;
     }
 
     return normalized;
+  }
+
+  private isCssColorValue(value: string): boolean {
+    return (
+      /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(value) ||
+      /^(rgb|rgba|hsl|hsla|oklch|lab|lch|color|var)\(/i.test(value) ||
+      /^(transparent|currentcolor|inherit|initial|unset)$/i.test(value)
+    );
   }
 
   private buildInteractiveSectionStateKey(

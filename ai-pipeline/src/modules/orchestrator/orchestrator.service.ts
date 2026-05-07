@@ -5277,10 +5277,20 @@ export default function ${component.name}() {
     const normalizedBase = baseUrl.trim();
     if (!normalizedBase) return null;
     try {
-      const base = normalizedBase.endsWith('/')
-        ? normalizedBase
-        : `${normalizedBase}/`;
-      return new URL(normalizedRoute, base).toString();
+      const base = new URL(
+        normalizedBase.endsWith('/') ? normalizedBase : `${normalizedBase}/`,
+      );
+      const routeUrl = new URL(normalizedRoute, 'http://compare.local');
+      const basePath = base.pathname.endsWith('/')
+        ? base.pathname
+        : `${base.pathname}/`;
+      const routePath = routeUrl.pathname.replace(/^\/+/, '');
+      base.pathname = routePath
+        ? `${basePath.replace(/\/+$/, '')}/${routePath}`
+        : basePath;
+      base.search = routeUrl.search;
+      base.hash = routeUrl.hash;
+      return base.toString();
     } catch {
       return null;
     }

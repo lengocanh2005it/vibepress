@@ -608,4 +608,28 @@ describe('ValidatorService derived collection bindings', () => {
     expect(code).toContain('League Spartan, sans-serif');
     expect(code).not.toContain('san-serif');
   });
+
+  it('keeps profolio scroll-top hooks only on dedicated trigger elements', () => {
+    const code = service.sanitizeGeneratedCode(`
+      import React from 'react';
+
+      export default function FrontPage() {
+        const html = '<p>Body</p>';
+        return (
+          <div className="wp-site-blocks flex profolio-fse-scroll-top">
+            <section className="profolio-fse-scroll-top hero">
+              <div>{html}</div>
+            </section>
+            <p className="profolio-fse-scroll-top" style={{ margin: 0 }} />
+          </div>
+        );
+      }
+    `);
+
+    expect(code).toContain('className="wp-site-blocks flex"');
+    expect(code).toContain('className="hero"');
+    expect(code).toContain('<p className="profolio-fse-scroll-top"');
+    expect(code).not.toContain('wp-site-blocks flex profolio-fse-scroll-top');
+    expect(code).not.toContain('profolio-fse-scroll-top hero');
+  });
 });

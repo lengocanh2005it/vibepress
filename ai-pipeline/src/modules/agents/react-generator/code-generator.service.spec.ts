@@ -125,6 +125,74 @@ describe('CodeGeneratorService', () => {
     expect(code).toContain('posts.slice(0, 5)');
   });
 
+  it('renders WooCommerce checkout block trees as checkout UI instead of raw block labels', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'Checkout',
+      renderMode: 'hybrid',
+      sections: [],
+      blockTree: [
+        {
+          kind: 'group',
+          children: [
+            {
+              kind: 'checkout',
+              blockName: 'woocommerce/checkout',
+              children: [
+                {
+                  kind: 'checkout-fields-block',
+                  blockName: 'woocommerce/checkout-fields-block',
+                },
+                {
+                  kind: 'checkout-totals-block',
+                  blockName: 'woocommerce/checkout-totals-block',
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain('woocommerce-checkout');
+    expect(code).toContain('Contact information');
+    expect(code).toContain('Order summary');
+    expect(code).not.toContain('Checkout Fields');
+  });
+
+  it('renders WooCommerce cart block trees as cart UI instead of empty wrappers', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'Cart',
+      renderMode: 'hybrid',
+      sections: [],
+      blockTree: [
+        {
+          kind: 'cart',
+          blockName: 'woocommerce/cart',
+          children: [
+            {
+              kind: 'cart-items-block',
+              blockName: 'woocommerce/cart-items-block',
+            },
+            {
+              kind: 'cart-totals-block',
+              blockName: 'woocommerce/cart-totals-block',
+            },
+          ],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain('woocommerce-cart');
+    expect(code).toContain('Cart totals');
+    expect(code).toContain('Proceed to checkout');
+  });
+
   it('preserves source search descendants instead of collapsing wrapper sections in hybrid output', () => {
     const plan = {
       ...basePlan,
@@ -427,6 +495,8 @@ describe('CodeGeneratorService', () => {
     expect(code).toContain(
       'renderRichTextChildren("Welcome To My Profile <br>I am <mark',
     );
+    expect(code).toContain('const parseRichTextStyle = ');
+    expect(code).toContain('if (style) props.style = style;');
   });
 
   it('resolves theme asset images inside card-grid sections', () => {
@@ -668,6 +738,51 @@ describe('CodeGeneratorService', () => {
     );
     expect(code.match(/const currentPage =/g)).toHaveLength(1);
     expect(code.match(/const \[totalPages, setTotalPages\]/g)).toHaveLength(1);
+  });
+
+  it('does not infer posts for product query block trees', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'ArchiveProduct',
+      dataNeeds: ['products'],
+      renderMode: 'hybrid',
+      sections: [
+        {
+          type: 'post-list',
+          resource: 'products',
+          layout: 'grid-3',
+          showFeaturedImage: true,
+        },
+      ],
+      blockTree: [
+        {
+          kind: 'query',
+          blockName: 'query',
+          children: [
+            {
+              kind: 'post-template',
+              blockName: 'post-template',
+              children: [
+                {
+                  kind: 'product-image',
+                  blockName: 'woocommerce/product-image',
+                },
+                {
+                  kind: 'product-price',
+                  blockName: 'woocommerce/product-price',
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain('/api/post-types/product/posts');
+    expect(code).not.toContain('/api/posts?page=');
+    expect(code).not.toContain('const [posts, setPosts]');
   });
 
   it('renders tag widgets inside sidebar sections as archive links', () => {
@@ -1041,7 +1156,17 @@ describe('CodeGeneratorService', () => {
           kind: 'group',
           blockName: 'group',
           customClassNames: ['pg-footer-center-row'],
+          bgColor: 'base-2',
           children: [
+            {
+              kind: 'columns',
+              blockName: 'columns',
+              children: [
+                {
+                  kind: 'column',
+                  blockName: 'column',
+                  columnWidth: '45%',
+                  children: [
             {
               kind: 'heading',
               blockName: 'heading',
@@ -1055,7 +1180,24 @@ describe('CodeGeneratorService', () => {
                   kind: 'social-link',
                   blockName: 'social-link',
                   text: 'Facebook',
-                  href: '#',
+                  attrs: { service: 'facebook', url: '#' },
+                },
+              ],
+            },
+                  ],
+                },
+                {
+                  kind: 'column',
+                  blockName: 'column',
+                  children: [
+                    {
+                      kind: 'image',
+                      blockName: 'image',
+                      src: 'theme-asset:/assets/images/arrow-up.png',
+                      customClassNames: ['is-resized'],
+                      width: 39,
+                    },
+                  ],
                 },
               ],
             },
@@ -1079,8 +1221,17 @@ describe('CodeGeneratorService', () => {
     const code = service.generate(plan);
 
     expect(code).toContain('pg-footer-center-row');
+    expect(code).toContain('wp-block-group');
+    expect(code).toContain('wp-block-columns');
+    expect(code).toContain('wp-block-column');
+    expect(code).toContain('has-base-2-background-color');
+    expect(code).not.toContain("backgroundColor: 'base-2'");
     expect(code).toContain("Let's Work Together");
-    expect(code).toContain('Facebook');
+    expect(code).toContain('<ul className="wp-block-social-links');
+    expect(code).toContain('wp-social-link-facebook');
+    expect(code).toContain('facebook');
+    expect(code).toContain('<figure className="wp-block-image size-full is-resized"');
+    expect(code).toContain('resolveAsset("theme-asset:/assets/images/arrow-up.png")');
     expect(code).toContain('Contact');
   });
 

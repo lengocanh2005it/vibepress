@@ -2,6 +2,76 @@ import { wpBlocksToJson } from './wp-block-to-json.js';
 import { mapWpNodesToDraftSections } from './wp-node-to-sections-mapper.js';
 
 describe('mapWpNodesToDraftSections', () => {
+  it('maps sidebar widget groups to sidebar sections instead of hero headings', () => {
+    const markup = `
+<!-- wp:group {"className":"sticky-sidebar","style":{"color":{"background":"#F4F4F4"},"spacing":{"padding":{"top":"1rem","right":"min(1.5rem, 2vw)","bottom":"1rem","left":"min(1.5rem, 2vw)"}}}} -->
+<div class="wp-block-group sticky-sidebar">
+  <!-- wp:group -->
+  <div class="wp-block-group">
+    <!-- wp:search {"label":"Search","showLabel":false,"placeholder":"Search"} /-->
+  </div>
+  <!-- /wp:group -->
+
+  <!-- wp:group -->
+  <div class="wp-block-group">
+    <!-- wp:heading {"level":3} -->
+    <h3 class="wp-block-heading">Latest Posts</h3>
+    <!-- /wp:heading -->
+    <!-- wp:latest-posts {"postsToShow":5} /-->
+  </div>
+  <!-- /wp:group -->
+
+  <!-- wp:group -->
+  <div class="wp-block-group">
+    <!-- wp:heading {"level":3} -->
+    <h3 class="wp-block-heading">Categories</h3>
+    <!-- /wp:heading -->
+    <!-- wp:categories {"showPostCounts":true} /-->
+  </div>
+  <!-- /wp:group -->
+
+  <!-- wp:group -->
+  <div class="wp-block-group">
+    <!-- wp:heading {"level":3} -->
+    <h3 class="wp-block-heading">Tags</h3>
+    <!-- /wp:heading -->
+    <!-- wp:tag-cloud /-->
+  </div>
+  <!-- /wp:group -->
+</div>
+<!-- /wp:group -->
+`;
+
+    const nodes = wpBlocksToJson(markup);
+    const sections = mapWpNodesToDraftSections(nodes);
+
+    expect(sections.map((section) => section.type)).toEqual([
+      'search',
+      'sidebar',
+      'sidebar',
+      'sidebar',
+    ]);
+    expect(sections.filter((section) => section.type === 'hero')).toHaveLength(
+      0,
+    );
+    expect(sections[1]).toMatchObject({
+      type: 'sidebar',
+      title: 'Latest Posts',
+      widgets: [{ kind: 'recent-posts', title: 'Latest Posts' }],
+      maxItems: 5,
+    });
+    expect(sections[2]).toMatchObject({
+      type: 'sidebar',
+      title: 'Categories',
+      widgets: [{ kind: 'categories', title: 'Categories', showCounts: true }],
+    });
+    expect(sections[3]).toMatchObject({
+      type: 'sidebar',
+      title: 'Tags',
+      widgets: [{ kind: 'tags', title: 'Tags' }],
+    });
+  });
+
   it('maps grouped core/details FAQ markup into one accordion section', () => {
     const markup = `
 <!-- wp:group {"metadata":{"name":"FAQ"},"layout":{"type":"constrained"}} -->
@@ -460,8 +530,9 @@ describe('mapWpNodesToDraftSections', () => {
   <!-- /wp:column -->
   <!-- wp:column -->
   <div class="wp-block-column">
-    <!-- wp:cover {"overlayColor":"secondary","minHeight":550,"className":"r-cover","style":{"border":{"radius":{"topLeft":"50%","topRight":"50%","bottomLeft":"0px","bottomRight":"0px"}},"spacing":{"padding":{"top":"0","right":"0","bottom":"0","left":"0"}}}} -->
+    <!-- wp:cover {"url":"/banner-bg.jpg","overlayColor":"secondary","minHeight":550,"className":"r-cover","style":{"border":{"radius":{"topLeft":"50%","topRight":"50%","bottomLeft":"0px","bottomRight":"0px"}},"spacing":{"padding":{"top":"0","right":"0","bottom":"0","left":"0"}}}} -->
     <div class="wp-block-cover r-cover" style="border-top-left-radius:50%;border-top-right-radius:50%;border-bottom-left-radius:0px;border-bottom-right-radius:0px;padding-top:0;padding-right:0;padding-bottom:0;padding-left:0;min-height:550px">
+      <img class="wp-block-cover__image-background" alt="" src="/banner-bg.jpg" />
       <span aria-hidden="true" class="wp-block-cover__background has-secondary-background-color has-background-dim-100 has-background-dim"></span>
       <div class="wp-block-cover__inner-container">
         <!-- wp:image -->

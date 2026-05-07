@@ -7,6 +7,9 @@ describe('preview source motion bridge assets', () => {
   it('includes sticky-header and scroll-top bridge CSS hooks', () => {
     expect(SOURCE_MOTION_BRIDGE_CSS).toContain('#sticky-header');
     expect(SOURCE_MOTION_BRIDGE_CSS).toContain('.profolio-fse-scroll-top');
+    expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
+      '.profolio-fse-scroll-top:not(p):not(a):not(button)::before',
+    );
     expect(SOURCE_MOTION_BRIDGE_CSS).toContain('.vp-source-reveal');
   });
 
@@ -28,6 +31,10 @@ describe('preview source motion bridge assets', () => {
     );
     expect(bootstrap).toContain(
       'if (structuralTags.has(element.tagName)) return false;',
+    );
+    expect(bootstrap).toContain('const removeLeakedScrollTopHooks = () => {');
+    expect(bootstrap).toContain(
+      "element.classList.remove('profolio-fse-scroll-top');",
     );
     expect(bootstrap).toContain(
       "window.scrollTo({ top: 0, behavior: 'smooth' });",
