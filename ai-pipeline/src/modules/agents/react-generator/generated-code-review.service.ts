@@ -591,6 +591,14 @@ ${component.code}
       });
     }
     if (isPageComponent) {
+      if (/dangerouslySetInnerHTML|\binnerHTML\b/.test(component.code)) {
+        issues.push({
+          severity: 'high',
+          message:
+            'Page/detail components must not render body HTML through `dangerouslySetInnerHTML` or `innerHTML`. Parse `post.content`/`page.content` into concrete React nodes with `renderRichTextChildren(...)` / `renderRichTextNode(...)` instead.',
+        });
+      }
+
       const allowedAuxiliaryLabels = mergeAuxiliaryLabels(
         contract?.sourceBackedAuxiliaryLabels,
         extractAuxiliaryLabelsFromSections(sections),

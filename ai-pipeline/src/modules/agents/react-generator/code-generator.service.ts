@@ -663,7 +663,14 @@ export class CodeGeneratorService {
           needs.add('posts');
           break;
         case 'query':
-          needs.add(this.blockTreeQueryUsesProducts(node) ? 'products' : 'posts');
+          needs.add(
+            this.blockTreeQueryUsesProducts(node) ? 'products' : 'posts',
+          );
+          break;
+        case 'cart':
+        case 'cart-cross-sells-products-block':
+        case 'product-new':
+          needs.add('products');
           break;
         case 'post-author-biography':
           needs.add('siteInfo');
@@ -804,7 +811,8 @@ export class CodeGeneratorService {
   }
 
   private needsRouter(plan: ComponentVisualPlan): boolean {
-    return plan.sections.some((s) =>
+    if (
+      plan.sections.some((s) =>
       [
         'navbar',
         'footer',
@@ -819,7 +827,32 @@ export class CodeGeneratorService {
         'hero',
         'cover',
       ].includes(s.type),
-    );
+      )
+    ) {
+      return true;
+    }
+    return this.blockTreeNeedsRouter(plan.blockTree ?? []);
+  }
+
+  private blockTreeNeedsRouter(nodes: BlockNode[]): boolean {
+    return nodes.some((node) => {
+      if (
+        [
+          'cart',
+          'cart-cross-sells-products-block',
+          'product-new',
+          'query',
+          'latest-posts',
+          'navigation',
+          'navigation-link',
+          'post-title',
+          'post-terms',
+        ].includes(node.kind)
+      ) {
+        return true;
+      }
+      return this.blockTreeNeedsRouter(node.children ?? []);
+    });
   }
 
   private needsLocation(plan: ComponentVisualPlan): boolean {
@@ -898,9 +931,7 @@ export class CodeGeneratorService {
     lines.push(`      if (!allowed.has(key)) return;`);
     lines.push(`      (style as Record<string, string>)[key] = cssValue;`);
     lines.push(`    });`);
-    lines.push(
-      `    return Object.keys(style).length > 0 ? style : undefined;`,
-    );
+    lines.push(`    return Object.keys(style).length > 0 ? style : undefined;`);
     lines.push(`  };`);
     lines.push(
       `  const renderRichTextNode = (node: ChildNode, key: string): React.ReactNode => {`,
@@ -914,9 +945,7 @@ export class CodeGeneratorService {
     lines.push(
       `    const className = element.getAttribute('class') || undefined;`,
     );
-    lines.push(
-      `    const title = element.getAttribute('title') || undefined;`,
-    );
+    lines.push(`    const title = element.getAttribute('title') || undefined;`);
     lines.push(
       `    const style = parseRichTextStyle(element.getAttribute('style'));`,
     );
@@ -1264,7 +1293,9 @@ export class CodeGeneratorService {
       needsPostsPagination &&
       (dataNeeds.includes('posts') || dataNeeds.includes('products'))
     ) {
-      lines.push(`  const [searchParams, setSearchParams] = useSearchParams();`);
+      lines.push(
+        `  const [searchParams, setSearchParams] = useSearchParams();`,
+      );
       lines.push(
         `  const currentPage = Math.max(1, Number(searchParams.get('page') ?? '1') || 1);`,
       );
@@ -2546,6 +2577,23 @@ ${indent}</div>`;
   ): string {
     const indent = '  '.repeat(depth + 3);
     const { p, t } = ctx;
+    const crossSellTitle =
+      this.findFirstDescendantText(
+        node,
+        (candidate) => candidate.kind === 'cart-cross-sells-block',
+      ) ?? 'You may be interested in…';
+    const emptyCartTitle =
+      this.findFirstDescendantText(node, (candidate) =>
+        candidate.kind === 'empty-cart-block',
+      ) ?? 'Your cart is currently empty!';
+    const newInStoreTitle =
+      this.findFirstDescendantText(
+        node,
+        (candidate) => candidate.kind === 'empty-cart-block',
+        (candidate) =>
+          candidate.kind === 'heading' &&
+          candidate.text?.trim() !== emptyCartTitle,
+      ) ?? 'New in store';
     const shellStyle = this.blockNodeStyleAttr(node, {
       backgroundColor: p.background,
     });
@@ -2559,7 +2607,19 @@ ${indent}          <span>Product</span>
 ${indent}          <span>Quantity</span>
 ${indent}          <span>Total</span>
 ${indent}        </div>
-${indent}        <div className="py-8 text-[${p.textMuted}]">Your cart items will appear here.</div>
+${indent}        <div className="py-8 text-[${p.textMuted}]">${this.escapeJsxText(emptyCartTitle)}</div>
+${indent}        <div className="mt-8 border-t border-black/10 pt-6">
+${indent}          <h2 className="${t.h3} font-normal text-[${p.text}]">${this.escapeJsxText(crossSellTitle)}</h2>
+${indent}          <div className="mt-4 grid gap-4 sm:grid-cols-2">
+${indent}            {products.slice(0, 2).map((product) => (
+${indent}              <Link key={product.id} to={\`/product/\${product.slug}\`} className="rounded-md border border-black/10 bg-white p-4 text-left hover:shadow-sm">
+${indent}                {product.featuredImage ? <img src={product.featuredImage} alt={product.title} className="mb-3 h-28 w-full rounded object-cover" /> : null}
+${indent}                <h3 className="font-semibold text-[${p.text}]">{product.title}</h3>
+${indent}                {product.price ? <p className="mt-1 text-sm text-[${p.textMuted}]">{product.price}</p> : null}
+${indent}              </Link>
+${indent}            ))}
+${indent}          </div>
+${indent}        </div>
 ${indent}      </div>
 ${indent}      <aside className="rounded-md border border-black/10 bg-[${p.surface}] p-6">
 ${indent}        <h2 className="${t.h3} font-normal text-[${p.text}]">Cart totals</h2>
@@ -2568,10 +2628,61 @@ ${indent}          <div className="flex justify-between border-b border-black/10
 ${indent}          <div className="flex justify-between text-lg font-semibold"><span>Total</span><span>-</span></div>
 ${indent}        </div>
 ${indent}        <a className="mt-6 inline-flex w-full items-center justify-center rounded-md bg-[${p.accent}] px-5 py-3 text-[${p.accentText}]" href="/checkout">Proceed to checkout</a>
+${indent}        <div className="mt-8 border-t border-black/10 pt-6">
+${indent}          <h2 className="${t.h3} font-normal text-[${p.text}]">${this.escapeJsxText(newInStoreTitle)}</h2>
+${indent}          <div className="mt-4 flex flex-col gap-3">
+${indent}            {products.slice(0, 3).map((product) => (
+${indent}              <Link key={\`new-\${product.id}\`} to={\`/product/\${product.slug}\`} className="text-sm text-[${p.text}] underline-offset-4 hover:underline">
+${indent}                {product.title}
+${indent}              </Link>
+${indent}            ))}
+${indent}          </div>
+${indent}        </div>
 ${indent}      </aside>
 ${indent}    </div>
 ${indent}  </div>
 ${indent}</section>`;
+  }
+
+  private findFirstDescendantText(
+    node: BlockNode,
+    rootMatcher: (node: BlockNode) => boolean,
+    textNodeMatcher: (node: BlockNode) => boolean = (candidate) =>
+      candidate.kind === 'heading' ||
+      candidate.kind === 'paragraph' ||
+      typeof candidate.text === 'string',
+  ): string | undefined {
+    const roots = this.findBlockTreeDescendants(node, rootMatcher);
+    for (const root of roots) {
+      const textNode = this.findBlockTreeDescendants(root, textNodeMatcher).find(
+        (candidate) => candidate.text?.trim(),
+      );
+      const text = textNode?.text?.trim();
+      if (text) return text;
+    }
+    return undefined;
+  }
+
+  private findBlockTreeDescendants(
+    node: BlockNode,
+    matcher: (node: BlockNode) => boolean,
+  ): BlockNode[] {
+    const matches: BlockNode[] = [];
+    const visit = (candidate: BlockNode) => {
+      if (matcher(candidate)) matches.push(candidate);
+      for (const child of candidate.children ?? []) visit(child);
+    };
+    visit(node);
+    return matches;
+  }
+
+  private escapeJsxText(value: string): string {
+    return value
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/\{/g, '&#123;')
+      .replace(/\}/g, '&#125;');
   }
 
   private renderBlockTreeCheckout(
@@ -2763,12 +2874,17 @@ ${indent}</div>`;
 
   private renderBlockTreeRecentPosts(node: BlockNode, depth: number): string {
     const indent = '  '.repeat(depth + 3);
+    const isProductQuery =
+      node.kind === 'query' && this.blockTreeQueryUsesProducts(node);
+    const collectionName = isProductQuery ? 'products' : 'posts';
+    const itemName = isProductQuery ? 'product' : 'post';
+    const routePrefix = isProductQuery ? '/product/' : '/post/';
     return `${indent}<div${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>
 ${indent}  <ul className="flex flex-col gap-2">
-${indent}    {posts.slice(0, 5).map((post) => (
-${indent}      <li key={post.id}>
-${indent}        <Link to={'/post/' + post.slug} className="hover:underline underline-offset-4">
-${indent}          {post.title}
+${indent}    {${collectionName}.slice(0, 5).map((${itemName}) => (
+${indent}      <li key={${itemName}.id}>
+${indent}        <Link to={'${routePrefix}' + ${itemName}.slug} className="hover:underline underline-offset-4">
+${indent}          {${itemName}.title}
 ${indent}        </Link>
 ${indent}      </li>
 ${indent}    ))}
@@ -3132,7 +3248,10 @@ ${indent}) : null}`;
             (section) => section.type === 'post-meta',
           );
         default:
-          if (this.isSidebarBlockNode(node)) {
+          if (
+            !['group', 'columns', 'column'].includes(node.kind) &&
+            this.isSidebarBlockNode(node)
+          ) {
             return findUnusedSectionIndex(
               (section) => section.type === 'sidebar',
             );

@@ -98,6 +98,7 @@ export interface GeneratedComponent {
   generationMode?: 'deterministic' | 'ai';
   requiredCustomClassNames?: string[];
   requiredCustomClassTargets?: Record<string, ThemeInteractionTarget>;
+  requiredSourceStyleFiles?: string[];
   visualPlan?: ComponentVisualPlan;
   surfacePlan?: PlannerSurfacePlan;
   renderContract?: ComponentRenderContract;

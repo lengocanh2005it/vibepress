@@ -500,7 +500,12 @@ ${routesBlock}
       );
     }
     if (themeDir) {
-      await this.applyThemeSourceStyles(frontendDir, themeDir, repoManifest);
+      await this.applyThemeSourceStyles(
+        frontendDir,
+        themeDir,
+        repoManifest,
+        components.components,
+      );
     }
 
     // 5. Generate .env cho từng folder
@@ -758,11 +763,17 @@ ${fontEntries}
     frontendDir: string,
     themeDir: string,
     repoManifest?: RepoThemeManifest,
+    components?: ReactGenerateResult['components'],
   ): Promise<void> {
     await this.applyThemeJsonGlobalStyles(frontendDir, themeDir, repoManifest);
 
     if (this.shouldUseThemeSourceCssBundle(themeDir, repoManifest)) {
-      await this.applyThemeSourceCssBundle(frontendDir, themeDir, repoManifest);
+      await this.applyThemeSourceCssBundle(
+        frontendDir,
+        themeDir,
+        repoManifest,
+        components,
+      );
       return;
     }
 
@@ -1030,11 +1041,13 @@ ${fontEntries}
     frontendDir: string,
     themeDir: string,
     repoManifest?: RepoThemeManifest,
+    components?: ReactGenerateResult['components'],
   ): Promise<void> {
     const themeSlug = this.resolveThemeSlug(themeDir, repoManifest);
     const cssEntries = await this.collectThemeSourceCssBundleEntries(
       themeDir,
       repoManifest,
+      components,
     );
     if (cssEntries.length === 0) return;
 
@@ -1064,6 +1077,13 @@ ${fontEntries}
       bundleChunks.push(`/* ${relPath} */\n${normalizedCss}`);
     }
 
+    const bundleOverrides = this.buildThemeSourceCssBundleOverrides(themeSlug);
+    if (bundleOverrides) {
+      bundleChunks.push(
+        `/* Vibepress theme source CSS overrides: ${themeSlug} */\n${bundleOverrides}`,
+      );
+    }
+
     if (bundleChunks.length <= 1) return;
 
     await Promise.all([
@@ -1080,18 +1100,52 @@ ${fontEntries}
     ]);
   }
 
+  private buildThemeSourceCssBundleOverrides(themeSlug: string): string {
+    if (themeSlug !== 'profolio-fse') return '';
+
+    return [
+      'html, body, #root {',
+      '  width: 100%;',
+      '  max-width: 100%;',
+      '  margin: 0;',
+      '  padding: 0;',
+      '}',
+      'body {',
+      '  overflow-x: hidden;',
+      '}',
+      '.wp-site-blocks {',
+      '  width: 100%;',
+      '  max-width: 100%;',
+      '}',
+    ].join('\n');
+  }
+
   private async collectThemeSourceCssBundleEntries(
     themeDir: string,
     repoManifest?: RepoThemeManifest,
+    components?: ReactGenerateResult['components'],
   ): Promise<string[]> {
     const fallbackPriority = [
       'style.css',
       'assets/font-awesome/css/all.css',
       'assets/css/animate.css',
     ];
+    const componentRequiredFiles = Array.from(
+      new Set(
+        (components ?? [])
+          .flatMap((component) => component.requiredSourceStyleFiles ?? [])
+          .map((file) =>
+            String(file ?? '')
+              .trim()
+              .replace(/\\/g, '/'),
+          )
+          .filter((file) => file.length > 0),
+      ),
+    );
     const prioritized = [
       ...fallbackPriority,
       ...(repoManifest?.sourceOfTruth?.styleFiles ?? []),
+      ...componentRequiredFiles,
     ];
     const uniqueEntries = Array.from(
       new Set(

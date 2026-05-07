@@ -772,7 +772,7 @@ describe('block-tree canonical profolio pages', () => {
     }),
   };
 
-  it('routes profolio content/listing templates through AI visual planning', () => {
+  it('routes only profolio marketing templates through locked AI visual planning', () => {
     for (const componentPlan of [
       {
         templateName: 'front-page',
@@ -790,6 +790,32 @@ describe('block-tree canonical profolio pages', () => {
         dataNeeds: ['posts'],
         isDetail: false,
       },
+      {
+        templateName: 'template-about',
+        componentName: 'TemplateAbout',
+        type: 'page' as const,
+        route: '/template-about',
+        dataNeeds: [],
+        isDetail: false,
+      },
+      {
+        templateName: 'template-contact',
+        componentName: 'TemplateContact',
+        type: 'page' as const,
+        route: '/template-contact',
+        dataNeeds: [],
+        isDetail: false,
+      },
+    ]) {
+      expect(
+        shouldUseAiVisualPlanningForProfolioSurface({
+          componentPlan,
+          content: profolioBaseInput.content,
+        }),
+      ).toBe(true);
+    }
+
+    for (const componentPlan of [
       {
         templateName: 'blog-left-sidebar',
         componentName: 'BlogLeftSidebar',
@@ -820,7 +846,7 @@ describe('block-tree canonical profolio pages', () => {
           componentPlan,
           content: profolioBaseInput.content,
         }),
-      ).toBe(true);
+      ).toBe(false);
     }
   });
 
@@ -860,111 +886,38 @@ describe('block-tree canonical profolio pages', () => {
     }
   });
 
-  it('keeps profolio FrontPage on AI section assembly even when the block tree is fully supported', () => {
-    const plan = buildBlockTreeDrivenVisualPlanForComponent({
-      ...profolioBaseInput,
-      componentPlan: {
-        templateName: 'front-page',
-        componentName: 'FrontPage',
-        type: 'page' as const,
-        route: '/',
-        dataNeeds: [],
-        isDetail: false,
-      },
-      draftSections: [
-        {
-          type: 'media-text',
-          heading: 'Welcome',
-          body: 'Intro',
-          imageSrc: 'theme-asset:/assets/images/banner.png',
+  it('declares profolio FrontPage as an AI-locked visual-plan surface before block-tree generation', () => {
+    expect(
+      shouldUseAiVisualPlanningForProfolioSurface({
+        componentPlan: {
+          templateName: 'front-page',
+          componentName: 'FrontPage',
+          type: 'page' as const,
+          route: '/',
+          dataNeeds: [],
+          isDetail: false,
         },
-      ] as ComponentVisualPlan['sections'],
-      draftBlockTree: [
-        {
-          kind: 'group',
-          blockName: 'group',
-          children: [
-            {
-              kind: 'columns',
-              blockName: 'columns',
-              children: [
-                {
-                  kind: 'column',
-                  blockName: 'column',
-                  children: [
-                    {
-                      kind: 'heading',
-                      blockName: 'heading',
-                      text: 'Welcome',
-                    },
-                    {
-                      kind: 'paragraph',
-                      blockName: 'paragraph',
-                      text: 'Intro',
-                    },
-                    {
-                      kind: 'buttons',
-                      blockName: 'buttons',
-                      children: [
-                        {
-                          kind: 'button',
-                          blockName: 'button',
-                          text: 'View Work',
-                          href: '#',
-                        },
-                      ],
-                    },
-                  ],
-                },
-                {
-                  kind: 'column',
-                  blockName: 'column',
-                  children: [
-                    {
-                      kind: 'image',
-                      blockName: 'image',
-                      src: 'theme-asset:/assets/images/banner.png',
-                    },
-                  ],
-                },
-              ],
-            },
-          ],
-        },
-      ] as BlockNode[],
-    });
-
-    expect(plan?.renderMode).toBe('section-centric');
-    expect(getVisualPlanRenderAuthority(plan)).toBe('ai');
-    expect(plan?.deterministicAuthority).toBe(false);
-    expect(plan?.lockPolicy?.bypassAiGeneration).toBeUndefined();
-    expect(plan?.lockPolicy?.reason).toContain(
-      'AI section assembly',
-    );
-    expect(plan?.sections).toEqual([
-      expect.objectContaining({
-        generationMode: 'section-assembly',
-        heading: 'Welcome',
+        content: profolioBaseInput.content,
       }),
-    ]);
+    ).toBe(true);
   });
 
-  it('keeps profolio TemplateServices on deterministic-structure when unsupported query/post block kinds remain', () => {
+  it('keeps profolio Archive on deterministic-structure when query sections are source-backed', () => {
     const plan = buildBlockTreeDrivenVisualPlanForComponent({
       ...profolioBaseInput,
       componentPlan: {
-        templateName: 'template-services',
-        componentName: 'TemplateServices',
+        templateName: 'archive',
+        componentName: 'Archive',
         type: 'page' as const,
-        route: '/services',
-        dataNeeds: ['pages'],
+        route: '/archive',
+        dataNeeds: ['posts'],
         isDetail: false,
       },
       draftSections: [
         {
-          type: 'card-grid',
-          columns: 3,
-          cards: [{ heading: 'Service', body: 'Description' }],
+          type: 'post-list',
+          resource: 'posts',
+          title: 'Latest Posts',
         },
       ] as ComponentVisualPlan['sections'],
       draftBlockTree: [
@@ -988,7 +941,12 @@ describe('block-tree canonical profolio pages', () => {
     expect(plan?.renderMode).not.toBe('block-centric');
     expect(getVisualPlanRenderAuthority(plan)).toBe('deterministic-structure');
     expect(plan?.lockPolicy?.bypassAiGeneration).toBeUndefined();
-    expect(plan?.lockPolicy?.reason).toContain('unsupported block kind');
+    expect(plan?.sections).toEqual([
+      expect.objectContaining({
+        type: 'post-list',
+        title: 'Latest Posts',
+      }),
+    ]);
   });
 });
 

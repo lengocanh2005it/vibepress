@@ -190,10 +190,7 @@ describe('PlanReviewerService', () => {
 
     expect(review.errors).toEqual([]);
     expect(footer?.dataNeeds).toEqual(['site-info', 'footer-links']);
-    expect(footer?.visualPlan?.dataNeeds).toEqual([
-      'siteInfo',
-      'footerLinks',
-    ]);
+    expect(footer?.visualPlan?.dataNeeds).toEqual(['siteInfo', 'footerLinks']);
   });
 
   it('allows multiple exact page bindings for the same named template', () => {

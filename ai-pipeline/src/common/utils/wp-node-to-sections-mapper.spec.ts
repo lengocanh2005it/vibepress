@@ -2,6 +2,107 @@ import { wpBlocksToJson } from './wp-block-to-json.js';
 import { mapWpNodesToDraftSections } from './wp-node-to-sections-mapper.js';
 
 describe('mapWpNodesToDraftSections', () => {
+  it('maps profolio-fse pattern references into source-backed page section skeletons', () => {
+    const markup = `
+<!-- wp:pattern {"slug":"profolio-fse/banner"} /-->
+<!-- wp:group {"tagName":"main"} -->
+<main class="wp-block-group">
+  <!-- wp:pattern {"slug":"profolio-fse/projects"} /-->
+  <!-- wp:pattern {"slug":"profolio-fse/services"} /-->
+  <!-- wp:pattern {"slug":"profolio-fse/experience"} /-->
+  <!-- wp:pattern {"slug":"profolio-fse/skills"} /-->
+</main>
+<!-- /wp:group -->
+`;
+
+    const nodes = wpBlocksToJson(markup);
+    const sections = mapWpNodesToDraftSections(nodes);
+
+    expect(sections.map((section) => section.debugKey)).toEqual([
+      'banner',
+      'projects',
+      'my-services',
+      'ui-ux-design',
+      'graphic-design',
+      'product-design',
+      'experience',
+      'skills',
+    ]);
+    expect(sections.map((section) => section.type)).toEqual([
+      'media-text',
+      'card-grid',
+      'hero',
+      'media-text',
+      'media-text',
+      'media-text',
+      'media-text',
+      'card-grid',
+    ]);
+  });
+
+  it('maps profolio-fse page template pattern references without dropping nested sections', () => {
+    const markup = `
+<!-- wp:pattern {"slug":"profolio-fse/services"} /-->
+<!-- wp:pattern {"slug":"profolio-fse/faq"} /-->
+<!-- wp:pattern {"slug":"profolio-fse/articles"} /-->
+`;
+
+    const nodes = wpBlocksToJson(markup);
+    const sections = mapWpNodesToDraftSections(nodes);
+
+    expect(sections.map((section) => section.debugKey)).toEqual([
+      'my-services',
+      'ui-ux-design',
+      'graphic-design',
+      'product-design',
+      'faq',
+      'articles',
+    ]);
+    expect(sections.find((section) => section.type === 'accordion')).toMatchObject({
+      type: 'accordion',
+      title: 'Frequently Asked Questions',
+    });
+    expect(sections.find((section) => section.type === 'post-list')).toMatchObject({
+      type: 'post-list',
+      title: 'Recent Blog Posts',
+      layout: 'grid-3',
+    });
+  });
+
+  it('maps profolio-fse single-post pattern to a canonical post-detail skeleton', () => {
+    const markup = `
+<!-- wp:pattern {"slug":"profolio-fse/single-post"} /-->
+`;
+
+    const nodes = wpBlocksToJson(markup);
+    const sections = mapWpNodesToDraftSections(nodes);
+
+    expect(sections.map((section) => section.debugKey)).toEqual([
+      'single-post-cover',
+      'single-post-featured-image',
+      'single-post-content',
+      'single-post-categories',
+      'single-post-tags',
+      'single-post-comment-form',
+      'sidebar-search',
+      'latest-posts',
+      'categories',
+      'tags',
+    ]);
+    expect(sections.map((section) => section.type)).toEqual([
+      'cover',
+      'post-featured-image',
+      'post-content',
+      'post-terms',
+      'post-terms',
+      'comments',
+      'search',
+      'sidebar',
+      'sidebar',
+      'sidebar',
+    ]);
+  });
+
   it('maps sidebar widget groups to sidebar sections instead of hero headings', () => {
     const markup = `
 <!-- wp:group {"className":"sticky-sidebar","style":{"color":{"background":"#F4F4F4"},"spacing":{"padding":{"top":"1rem","right":"min(1.5rem, 2vw)","bottom":"1rem","left":"min(1.5rem, 2vw)"}}}} -->
@@ -283,16 +384,16 @@ describe('mapWpNodesToDraftSections', () => {
     expect(sections.some((section) => section.type === 'card-grid')).toBe(
       false,
     );
-    expect(sections.find((section) => section.type === 'post-list')).toMatchObject(
-      {
-        type: 'post-list',
-        layout: 'grid-3',
-        showAuthor: true,
-        showDate: true,
-        showExcerpt: true,
-        showFeaturedImage: true,
-      },
-    );
+    expect(
+      sections.find((section) => section.type === 'post-list'),
+    ).toMatchObject({
+      type: 'post-list',
+      layout: 'grid-3',
+      showAuthor: true,
+      showDate: true,
+      showExcerpt: true,
+      showFeaturedImage: true,
+    });
   });
 
   it('collapses repeated testimonial group cards into one card-grid section', () => {

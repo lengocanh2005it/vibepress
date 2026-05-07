@@ -108,17 +108,34 @@ describe('PreviewBuilderService', () => {
         `@charset "UTF-8"; .animate__zoomIn { animation-name: zoomIn; }`,
         'utf-8',
       );
+      await writeFile(
+        join(animateCssDir, 'custom-properties.css'),
+        `:root { --profolio-card-radius: 10px; } .custom-card { border-radius: var(--profolio-card-radius); }`,
+        'utf-8',
+      );
 
-      await (service as any).applyThemeSourceStyles(frontendDir, themeDir, {
-        themeTypeHints: { themeSlug: 'profolio-fse' },
-        sourceOfTruth: {
-          styleFiles: [
-            'style.css',
-            'assets/font-awesome/css/all.css',
-            'assets/css/animate.css',
-          ],
+      await (service as any).applyThemeSourceStyles(
+        frontendDir,
+        themeDir,
+        {
+          themeTypeHints: { themeSlug: 'profolio-fse' },
+          sourceOfTruth: {
+            styleFiles: [
+              'style.css',
+              'assets/font-awesome/css/all.css',
+              'assets/css/animate.css',
+            ],
+          },
         },
-      });
+        [
+          {
+            name: 'FrontPage',
+            filePath: '',
+            code: 'export default function FrontPage(){return null;}',
+            requiredSourceStyleFiles: ['assets/css/custom-properties.css'],
+          },
+        ],
+      );
 
       const [nextCss, bundledCss] = await Promise.all([
         readFile(join(srcDir, 'index.css'), 'utf-8'),
@@ -132,11 +149,18 @@ describe('PreviewBuilderService', () => {
       expect(bundledCss).toContain('/* style.css */');
       expect(bundledCss).toContain('/* assets/font-awesome/css/all.css */');
       expect(bundledCss).toContain('/* assets/css/animate.css */');
+      expect(bundledCss).toContain('/* assets/css/custom-properties.css */');
+      expect(bundledCss).toContain('--profolio-card-radius: 10px;');
       expect(bundledCss).toContain(
         'url("/assets/font-awesome/webfonts/fa-solid-900.woff2")',
       );
       expect(bundledCss).not.toContain('@charset "UTF-8";');
       expect(bundledCss).toContain('.animate__zoomIn');
+      expect(bundledCss).toContain(
+        '/* Vibepress theme source CSS overrides: profolio-fse */',
+      );
+      expect(bundledCss).toContain('html, body, #root {');
+      expect(bundledCss).toContain('padding: 0;');
     } finally {
       await rm(rootDir, { recursive: true, force: true });
     }

@@ -62,7 +62,9 @@ function normalizeSupportedModel(
       ...OPENAI_ALLOWED_MODELS,
     ]
       .map((model) => `openai/${model}`)
-      .join(', ')}, custom/${CUSTOM_CODE_MODEL}, custom/${CUSTOM_REASONING_MODEL}`,
+      .join(
+        ', ',
+      )}, custom/${CUSTOM_CODE_MODEL}, custom/${CUSTOM_REASONING_MODEL}`,
   );
 }
 

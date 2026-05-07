@@ -7,6 +7,8 @@ import {
   type ThemeRepoAnalysisManifestPatch,
   type ThemeRepoAnalysisStrategy,
 } from './strategies/theme-repo-analysis.strategy.js';
+import { wpBlocksToJsonWithSourceRefs } from '../../../common/utils/wp-block-to-json.js';
+import { mapWpNodesToDraftSections } from '../../../common/utils/wp-node-to-sections-mapper.js';
 
 // Module-level constants — shared by bucketFiles() and categorizeAssets()
 const STYLE_EXTS = new Set(['.css', '.scss', '.sass', '.less']);
@@ -475,6 +477,7 @@ export interface RepoThemeRouteSourceSummary {
   templatePartSlugs: string[];
   blockTypes: string[];
   headingTexts: string[];
+  sectionBlueprint?: string[];
   customClasses: string[];
   assetFiles: string[];
   notes: string[];
@@ -1016,6 +1019,14 @@ export class RepoAnalyzerService {
       );
     }
 
+    const sectionBlueprint = chain?.composedSource
+      ? this.buildThemeRouteSectionBlueprint({
+          source: chain.composedSource,
+          routeFamily: config.routeFamily,
+          entryFile: config.entryFile,
+        })
+      : [];
+
     return {
       routeFamily: config.routeFamily,
       entryFile: config.entryFile,
@@ -1025,10 +1036,40 @@ export class RepoAnalyzerService {
       templatePartSlugs: Array.from(collected.templatePartSlugs).sort(),
       blockTypes: Array.from(collected.blockTypes).sort(),
       headingTexts: Array.from(collected.headingTexts).sort(),
+      ...(sectionBlueprint.length > 0 ? { sectionBlueprint } : {}),
       customClasses: Array.from(collected.customClasses).sort(),
       assetFiles: Array.from(collected.assetFiles).sort(),
       notes: Array.from(new Set(notes)),
     };
+  }
+
+  private buildThemeRouteSectionBlueprint(input: {
+    source: string;
+    routeFamily: string;
+    entryFile: string;
+  }): string[] {
+    try {
+      const nodes = wpBlocksToJsonWithSourceRefs({
+        markup: input.source,
+        templateName: input.routeFamily,
+        sourceFile: input.entryFile,
+      });
+      return mapWpNodesToDraftSections(nodes)
+        .map((section) => {
+          const label =
+            section.debugKey ??
+            section.sectionKey ??
+            ('heading' in section && typeof section.heading === 'string'
+              ? section.heading
+              : 'title' in section && typeof section.title === 'string'
+                ? section.title
+                : '');
+          return label ? `${section.type}:${label}` : section.type;
+        })
+        .slice(0, 16);
+    } catch {
+      return [];
+    }
   }
 
   private collectThemeRouteSourceFiles(

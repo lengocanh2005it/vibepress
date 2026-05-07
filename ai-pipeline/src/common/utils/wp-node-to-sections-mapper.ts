@@ -11,7 +11,6 @@
  * unless the underlying source structure explicitly contradicts the draft.
  */
 
-import type { ChunkPlan, ChunkStructuralKind } from '../types/chunk.schema.js';
 import type { WpNode } from './wp-block-to-json.js';
 import type {
   SectionPlan,
@@ -637,6 +636,12 @@ function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
   if (block === 'core/comments' || block === 'comments') {
     return toMappedSections(mapComments(node), node);
   }
+  if (
+    block === 'core/post-comments-form' ||
+    block === 'post-comments-form'
+  ) {
+    return toMappedSections(mapPostCommentsForm(node), node);
+  }
 
   // Separator / spacer — skip, not a section
   if (block === 'core/separator' || block === 'separator') {
@@ -773,13 +778,404 @@ function mapTemplatePart(node: WpNode): SectionPlan | null {
   return null;
 }
 
-function mapPattern(node: WpNode): SectionPlan | null {
+function mapPattern(node: WpNode): SectionPlan | SectionPlan[] | null {
   const slug = String(node.params?.slug ?? '').toLowerCase();
   if (!slug) return null;
   if (slug.includes('post-navigation')) {
     return buildPostNavigationSection();
   }
+  const profolioSections = mapProfolioFsePattern(slug);
+  if (profolioSections) return profolioSections;
   return null;
+}
+
+function mapProfolioFsePattern(slug: string): SectionPlan[] | null {
+  const pattern = slug.replace(/^profolio-fse\//, '');
+  if (pattern === slug) return null;
+
+  switch (pattern) {
+    case 'front-page':
+      return [
+        ...profolioBannerSections(),
+        ...profolioProjectsSections(),
+        ...profolioServicesSections(),
+        ...profolioExperienceSections(),
+        ...profolioSkillsSections(),
+      ];
+    case 'about-page':
+      return [
+        ...profolioProjectsSections(),
+        ...profolioExperienceSections(),
+        ...profolioTestimonialsSections(),
+        ...profolioSkillsSections(),
+      ];
+    case 'services-page':
+      return [
+        ...profolioServicesSections(),
+        ...profolioFaqSections(),
+        ...profolioArticlesSections(),
+      ];
+    case 'contact-page':
+      return [
+        ...profolioContactSections(),
+        ...profolioTestimonialsSections(),
+        ...profolioSkillsSections(),
+      ];
+    case 'banner':
+      return profolioBannerSections();
+    case 'projects':
+      return profolioProjectsSections();
+    case 'services':
+      return profolioServicesSections();
+    case 'experience':
+      return profolioExperienceSections();
+    case 'skills':
+      return profolioSkillsSections();
+    case 'testimonials':
+      return profolioTestimonialsSections();
+    case 'faq':
+      return profolioFaqSections();
+    case 'articles':
+      return profolioArticlesSections();
+    case 'contact':
+      return profolioContactSections();
+    case 'sidebar':
+      return profolioSidebarSections();
+    case 'single-post':
+      return profolioSinglePostSections();
+    default:
+      return null;
+  }
+}
+
+function profolioBannerSections(): SectionPlan[] {
+  return [
+    {
+      type: 'media-text',
+      debugKey: 'banner',
+      subtitle: 'About Me',
+      heading:
+        'Welcome To My Profile <br>I am <mark>Julia Henderson</mark>',
+      body:
+        'Mattis pellentesque ex phasellus amet nulla aliquam commodo eu posuere in sit efficitur per libero consectetuer id elit neque condimentum parturient Adipiscing ipsum netus donec erat vivamus congue eget fermentum',
+      imageSrc: 'theme-asset:/assets/images/banner-image.png',
+      imageAlt: '',
+      imagePosition: 'right',
+      background: 'primary',
+      textColor: 'white',
+      customClassNames: ['profolio-fse-banner-wrapper'],
+      cta: { text: 'View my Work', link: '#' },
+    },
+  ];
+}
+
+function profolioProjectsSections(): SectionPlan[] {
+  return [
+    {
+      type: 'card-grid',
+      debugKey: 'projects',
+      subtitle: 'My Projects',
+      title: 'Some Of My Projects',
+      columns: 4,
+      cards: [
+        {
+          heading: 'Design of a mobile app develops',
+          body:
+            'Nullam maecenas gravida suscipit potenti lorem eros si tincidunt litora imperdiet maximus dapibus eu hendrerit tempus cras adipiscing faucibus sem consectetur platea justo euismod',
+          imageSrc: 'theme-asset:/assets/images/projects-1.jpg',
+          imageAlt: '',
+        },
+        {
+          heading: 'AI Based Social Networks',
+          body:
+            'Nullam maecenas gravida suscipit potenti lorem eros si tincidunt litora imperdiet maximus dapibus eu hendrerit tempus cras adipiscing faucibus sem consectetur platea justo euismod',
+          imageSrc: 'theme-asset:/assets/images/projects-2.jpg',
+          imageAlt: '',
+        },
+        {
+          heading: 'NFT Buy and Sell Platform',
+          body:
+            'Nullam maecenas gravida suscipit potenti lorem eros si tincidunt litora imperdiet maximus dapibus eu hendrerit tempus cras adipiscing faucibus sem consectetur platea justo euismod',
+          imageSrc: 'theme-asset:/assets/images/projects-3.jpg',
+          imageAlt: '',
+        },
+        {
+          heading: 'Web Traffic Management',
+          body:
+            'Nullam maecenas gravida suscipit potenti lorem eros si tincidunt litora imperdiet maximus dapibus eu hendrerit tempus cras adipiscing faucibus sem consectetur platea justo euismod',
+        },
+      ],
+    },
+  ];
+}
+
+function profolioServicesSections(): SectionPlan[] {
+  const body =
+    'Class aptent taciti sociosqu ad litora torquent per conubia nostra, per inceptos hymenaeos. Suspendisse enim turpis, dictum sed, iaculis a, condimentum nec, nisi. Aenean ut eros et nisl sagittis vestibulum.';
+  return [
+    {
+      type: 'hero',
+      debugKey: 'my-services',
+      layout: 'centered',
+      subheading: 'Services',
+      heading: 'My Services',
+    },
+    {
+      type: 'media-text',
+      debugKey: 'ui-ux-design',
+      heading: 'UI/UX Design',
+      body,
+      imageSrc: 'theme-asset:/assets/images/projects-1.jpg',
+      imageAlt: '',
+      imagePosition: 'right',
+      background: 'primary',
+      textColor: 'white',
+      cta: { text: 'View My Work', link: '#' },
+    },
+    {
+      type: 'media-text',
+      debugKey: 'graphic-design',
+      heading: 'Graphic Design',
+      body,
+      imageSrc: 'theme-asset:/assets/images/projects-2.jpg',
+      imageAlt: '',
+      imagePosition: 'left',
+      background: '#f1f5f9',
+      cta: { text: 'View My Work', link: '#' },
+    },
+    {
+      type: 'media-text',
+      debugKey: 'product-design',
+      heading: 'Product Design',
+      body,
+      imageSrc: 'theme-asset:/assets/images/projects-3.jpg',
+      imageAlt: '',
+      imagePosition: 'right',
+      background: '#f1f5f9',
+      cta: { text: 'View My Work', link: '#' },
+    },
+  ];
+}
+
+function profolioExperienceSections(): SectionPlan[] {
+  return [
+    {
+      type: 'media-text',
+      debugKey: 'experience',
+      subtitle: 'Experience',
+      heading: 'Lead Product and Designer and Art Director',
+      body:
+        'Mattis pellentesque ex phasellus amet nulla aliquam commodo eu posuere in sit efficitur per libero consectetuer id elit neque condimentum parturient',
+      imageSrc: 'theme-asset:/assets/images/experience.jpg',
+      imageAlt: '',
+      imagePosition: 'left',
+    },
+  ];
+}
+
+function profolioSkillsSections(): SectionPlan[] {
+  return [
+    {
+      type: 'card-grid',
+      debugKey: 'skills',
+      subtitle: 'Skills',
+      title: 'Skills and Tools',
+      columns: 4,
+      cards: [
+        {
+          heading: 'UI/UX Deisgn',
+          body: '',
+          imageSrc: 'theme-asset:/assets/images/figma.png',
+          imageAlt: '',
+        },
+        {
+          heading: 'Graphic Deisgn',
+          body: '',
+          imageSrc: 'theme-asset:/assets/images/photoshop.png',
+          imageAlt: '',
+        },
+        {
+          heading: 'Illustrator',
+          body: '',
+          imageSrc: 'theme-asset:/assets/images/illustrator.png',
+          imageAlt: '',
+        },
+        {
+          heading: 'After Effects',
+          body: '',
+          imageSrc: 'theme-asset:/assets/images/after-effects.png',
+          imageAlt: '',
+        },
+        {
+          heading: 'Wordpress',
+          body: '',
+          imageSrc: 'theme-asset:/assets/images/wordpress.png',
+          imageAlt: '',
+        },
+      ],
+    },
+  ];
+}
+
+function profolioTestimonialsSections(): SectionPlan[] {
+  return [
+    {
+      type: 'testimonial',
+      debugKey: 'testimonials',
+      quote:
+        'Eu lorem vel eget libero quam curabitur consequat cursus faucibus auctor placerat ad egestas sodales ipsum cras leo lectus adipiscing a at tortor natoque ultrices commodo non pharetra mollis nisl morbi euismod nibh arcu interdum augue',
+      authorName: 'Sarah Jenkins',
+      authorTitle: 'CEO at TechFLow',
+    },
+  ];
+}
+
+function profolioFaqSections(): SectionPlan[] {
+  const body =
+    'Porttitor amet luctus aenean aptent netus consectetuer suspendisse. Senectus semper posuere vehicula dui auctor penatibus praesent venenatis nullam.';
+  return [
+    {
+      type: 'accordion',
+      debugKey: 'faq',
+      title: 'Frequently Asked Questions',
+      items: [
+        {
+          heading:
+            'Rhoncus elit curae dictum mauris natoque urna imperdiet laoreet aptent',
+          body,
+        },
+        {
+          heading:
+            'Porta suspendisse dis semper commodo et aenean magnis laoreet vehicula',
+          body,
+        },
+        {
+          heading:
+            'Ac id inceptos eleifend purus ante dapibus ultricies magna dictumst',
+          body,
+        },
+        {
+          heading:
+            'Fusce viverra tempus sociosqu a commodo cubilia orci egestas consequat',
+          body,
+        },
+        {
+          heading:
+            'Sodales massa fusce proin egestas facilisi vestibulum nostra montes ornare',
+          body,
+        },
+      ],
+    },
+  ];
+}
+
+function profolioArticlesSections(): SectionPlan[] {
+  return [
+    {
+      type: 'post-list',
+      debugKey: 'articles',
+      title: 'Recent Blog Posts',
+      layout: 'grid-3',
+      showFeaturedImage: true,
+      showExcerpt: true,
+      showDate: true,
+      showAuthor: true,
+      showCategory: true,
+    },
+  ];
+}
+
+function profolioContactSections(): SectionPlan[] {
+  return [
+    {
+      type: 'media-text',
+      debugKey: 'lets-work-together',
+      subtitle: 'Contact',
+      heading: "Let's Work Together",
+      body:
+        'Mattis pellentesque ex phasellus amet nulla aliquam commodo eu posuere in sit efficitur per libero consectetuer id elit neque condimentum parturient',
+      imageSrc: '',
+      imageAlt: '',
+      imagePosition: 'right',
+    },
+  ];
+}
+
+function profolioSidebarSections(): SectionPlan[] {
+  return [
+    { type: 'search', debugKey: 'sidebar-search', title: 'Search' },
+    {
+      type: 'sidebar',
+      debugKey: 'latest-posts',
+      title: 'Latest Posts',
+      widgets: [{ kind: 'recent-posts', title: 'Latest Posts' }],
+      maxItems: 5,
+    },
+    {
+      type: 'sidebar',
+      debugKey: 'categories',
+      title: 'Categories',
+      widgets: [{ kind: 'categories', title: 'Categories' }],
+    },
+    {
+      type: 'sidebar',
+      debugKey: 'tags',
+      title: 'Tags',
+      widgets: [{ kind: 'tags', title: 'Tags' }],
+    },
+  ];
+}
+
+function profolioSinglePostSections(): SectionPlan[] {
+  return [
+    {
+      type: 'cover',
+      debugKey: 'single-post-cover',
+      imageSrc: 'theme-asset:/assets/images/banner.jpg',
+      dimRatio: 90,
+      minHeight: '232px',
+      contentAlign: 'center',
+    },
+    {
+      type: 'post-featured-image',
+      debugKey: 'single-post-featured-image',
+      padding: 'none',
+      imageRadius: '10px',
+    },
+    {
+      type: 'post-content',
+      debugKey: 'single-post-content',
+      padding: 'none',
+      showTitle: false,
+      showAuthor: false,
+      showDate: false,
+      showCategories: false,
+    },
+    {
+      type: 'post-terms',
+      debugKey: 'single-post-categories',
+      padding: 'none',
+      taxonomy: 'category',
+      prefix: '<strong>Categories</strong>: ',
+      layout: 'inline',
+    },
+    {
+      type: 'post-terms',
+      debugKey: 'single-post-tags',
+      padding: 'none',
+      taxonomy: 'post_tag',
+      layout: 'inline',
+    },
+    {
+      type: 'comments',
+      debugKey: 'single-post-comment-form',
+      padding: 'none',
+      showForm: true,
+      requireName: true,
+      requireEmail: true,
+    },
+    ...profolioSidebarSections(),
+  ];
 }
 
 // ── navigation ──────────────────────────────────────────────────────────────
@@ -1221,9 +1617,9 @@ function mapQuery(node: WpNode): PostListSection {
             ? 'grid-3'
             : responsiveGridColumns === 2
               ? 'grid-2'
-          : columnsInTemplate
-            ? 'grid-3'
-            : 'list';
+              : columnsInTemplate
+                ? 'grid-3'
+                : 'list';
   const itemLayout: PostListSection['itemLayout'] =
     compactMetaRowTemplate || isMinimalTitleOnlyTemplate
       ? 'title-meta-inline'
@@ -1742,6 +2138,16 @@ function mapComments(node: WpNode): CommentsSection {
     type: 'comments',
     padding: 'none',
     showForm: hasCommentForm,
+    requireName: true,
+    requireEmail: true,
+  };
+}
+
+function mapPostCommentsForm(_node: WpNode): CommentsSection {
+  return {
+    type: 'comments',
+    padding: 'none',
+    showForm: true,
     requireName: true,
     requireEmail: true,
   };
@@ -2529,10 +2935,13 @@ function mapUagbModal(node: WpNode): ModalSection | null {
 }
 
 function toMappedSections(
-  section: SectionPlan | null,
+  section: SectionPlan | SectionPlan[] | null,
   node: WpNode,
 ): SectionPlan[] {
   if (!section) return [];
+  if (Array.isArray(section)) {
+    return section.map((entry) => applyNodePresentation(entry, node));
+  }
   return [applyNodePresentation(section, node)];
 }
 
@@ -3974,137 +4383,6 @@ function buildSectionCta(node: WpNode): SectionCta {
       ? { customClassNames: uniqueClassNames(node.customClassNames) }
       : {}),
   };
-}
-
-// ── Chunk builder ───────────────────────────────────────────────────────────
-//
-// Deterministic chunker: WpNode[] → ChunkPlan[]
-//
-// Splits the top-level node list into independent structural chunks before AI
-// labeling. Each chunk is one logical section of the page (e.g. banner,
-// projects, services). AI receives one chunk at a time and only answers
-// "what semantic kind is this?" — it cannot reorder, merge, or drop chunks.
-
-/**
- * Main public entry point. Converts a flat WpNode[] (page source) into an
- * ordered array of ChunkPlans, one per structural subtree.
- */
-export function buildPlannerChunksFromNodes(nodes: WpNode[]): ChunkPlan[] {
-  const groups = splitTopLevelChunkCandidates(nodes);
-  return groups.map((group, index) => buildChunkPlanFromNodes(group, index));
-}
-
-/**
- * Splits top-level WpNodes into chunk groups.
- *
- * Default: each top-level node → its own chunk.
- * Escape hatch: a core/group that contains ONLY semantic boundary nodes is
- * unwrapped so each child becomes its own chunk (avoids grouping unrelated
- * sections under one opaque wrapper).
- */
-export function splitTopLevelChunkCandidates(nodes: WpNode[]): WpNode[][] {
-  const result: WpNode[][] = [];
-  for (const node of nodes) {
-    if (isSpacerBlock(node.block) || isSeparatorBlock(node.block)) continue;
-
-    // Escape hatch: transparent group wrapper holding only semantic nodes
-    if (
-      (node.block === 'core/group' || node.block === 'group') &&
-      node.children?.length &&
-      node.children.every(
-        (child) =>
-          isSpacerBlock(child.block) ||
-          isSeparatorBlock(child.block) ||
-          isSemanticChunkBoundaryNode(child),
-      )
-    ) {
-      for (const child of node.children) {
-        if (!isSpacerBlock(child.block) && !isSeparatorBlock(child.block)) {
-          result.push([child]);
-        }
-      }
-      continue;
-    }
-
-    result.push([node]);
-  }
-  return result;
-}
-
-/**
- * Returns true when a node represents a strong semantic chunk boundary:
- * pattern, template-part, columns, cover, query, or major uagb containers.
- * Inner core/group nodes do NOT qualify — they stay inside their parent chunk.
- */
-export function isSemanticChunkBoundaryNode(node: WpNode): boolean {
-  const block = node.block;
-  return (
-    block === 'core/pattern' ||
-    block === 'pattern' ||
-    block === 'core/template-part' ||
-    block === 'template-part' ||
-    block === 'core/columns' ||
-    block === 'columns' ||
-    block === 'core/cover' ||
-    block === 'cover' ||
-    block === 'core/query' ||
-    block === 'query' ||
-    block === 'uagb/container' ||
-    block === 'uagb/section'
-  );
-}
-
-function buildChunkPlanFromNodes(nodes: WpNode[], index: number): ChunkPlan {
-  const primary = nodes[0];
-  const structuralKind = resolveChunkStructuralKind(primary);
-  const chunkId = `chunk-${index + 1}-${structuralKind}`;
-
-  const allDescendants = nodes.flatMap((n) => [n, ...flattenChildren(n)]);
-  const blockNames = [
-    ...new Set(allDescendants.map((n) => n.block).filter(Boolean)),
-  ];
-  const wrapperClassNames = uniqueClassNames(primary?.customClassNames ?? []);
-  const draftSections = deduplicateSectionKeys(mapNodes(nodes, nodes));
-
-  return {
-    chunkId,
-    order: index,
-    structuralKind,
-    sourceRef: {
-      ...(primary?.sourceRef?.sourceNodeId
-        ? { sourceNodeId: primary.sourceRef.sourceNodeId }
-        : {}),
-      ...(primary?.sourceRef?.templateName
-        ? { templateName: primary.sourceRef.templateName }
-        : {}),
-      ...(primary?.sourceRef?.sourceFile
-        ? { sourceFile: primary.sourceRef.sourceFile }
-        : {}),
-      topLevelIndex: index,
-      ...(primary?.block ? { blockName: primary.block } : {}),
-    },
-    blockNames,
-    wrapperClassNames,
-    ...(primary?.html ? { rawHtml: primary.html.slice(0, 500) } : {}),
-    draftSections,
-  };
-}
-
-function resolveChunkStructuralKind(
-  node: WpNode | undefined,
-): ChunkStructuralKind {
-  if (!node) return 'misc';
-  const block = node.block;
-  if (block === 'core/pattern' || block === 'pattern') return 'pattern';
-  if (block === 'core/template-part' || block === 'template-part')
-    return 'template-part';
-  if (block === 'core/group' || block === 'group') return 'group';
-  if (block === 'core/columns' || block === 'columns') return 'columns';
-  if (block === 'core/cover' || block === 'cover') return 'cover';
-  if (block === 'core/query' || block === 'query') return 'query';
-  if (block === 'uagb/container') return 'uagb-container';
-  if (block === 'uagb/section') return 'uagb-section';
-  return 'misc';
 }
 
 function buildSectionCtas(nodes: WpNode[]): SectionCta[] {

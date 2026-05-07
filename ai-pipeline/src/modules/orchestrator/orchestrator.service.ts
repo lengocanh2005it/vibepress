@@ -6899,7 +6899,6 @@ export default function ${component.name}() {
       hasStructuralIssue ||
       primaryRootCause === 'plan-omission' ||
       primaryRootCause === 'missing-section' ||
-      primaryRootCause === 'route-mapping-error' ||
       primaryRootCause === 'data-binding-error' ||
       primaryRootCause === 'content-drift' ||
       primaryRootCause === 'missing-image';

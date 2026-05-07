@@ -165,6 +165,127 @@ describe('PlannerService shared chrome visual plans', () => {
     expect(enriched[0]?.dataNeeds).toEqual([]);
   });
 
+  it('enriches profolio single-product data needs from repo source-chain Woo blocks', () => {
+    const enriched = (service as any).enrichPlan(
+      [
+        {
+          templateName: 'single-product',
+          componentName: 'SingleProduct',
+          type: 'page',
+          route: '/product/:slug',
+          dataNeeds: [],
+          isDetail: true,
+          description: 'Product detail',
+        },
+      ],
+      new Map<string, string>([
+        [
+          'single-product',
+          '<!-- wp:pattern {"slug":"profolio-fse/single-product"} /-->',
+        ],
+      ]),
+      {
+        siteInfo: { activeTheme: 'profolio-fse' },
+        themeResolvedContent: { themeSlug: 'profolio-fse' },
+      },
+      {
+        themeJsonSummary: { templatePartAreas: [] },
+        structureHints: {
+          entrySourceChains: [
+            {
+              entryFile: 'patterns/single-product.php',
+              routeHint: 'single-product',
+              chainFiles: ['templates/single-product.html', 'patterns/single-product.php'],
+              composedSource:
+                '<!-- wp:woocommerce/product-image /--><!-- wp:woocommerce/add-to-cart-form /--><!-- wp:woocommerce/related-products /-->',
+              assetFiles: [],
+              runtimeFiles: [],
+              blockTypes: [
+                'woocommerce/product-image',
+                'woocommerce/add-to-cart-form',
+                'woocommerce/related-products',
+              ],
+              headingTexts: ['Related Products'],
+              notes: [],
+            },
+          ],
+        },
+      },
+    );
+
+    expect(enriched[0]?.dataNeeds).toEqual(['product-detail', 'products']);
+  });
+
+  it('enriches profolio marketing template posts only when the source-chain contains a query pattern', () => {
+    const enriched = (service as any).enrichPlan(
+      [
+        {
+          templateName: 'front-page',
+          componentName: 'FrontPage',
+          type: 'page',
+          route: '/',
+          dataNeeds: [],
+          isDetail: false,
+          description: 'Home',
+        },
+        {
+          templateName: 'template-services',
+          componentName: 'TemplateServices',
+          type: 'page',
+          route: '/template-services',
+          dataNeeds: [],
+          isDetail: false,
+          description: 'Services',
+        },
+      ],
+      new Map<string, string>([
+        ['front-page', '<!-- wp:pattern {"slug":"profolio-fse/front-page"} /-->'],
+        [
+          'template-services',
+          '<!-- wp:pattern {"slug":"profolio-fse/services-page"} /-->',
+        ],
+      ]),
+      {
+        siteInfo: { activeTheme: 'profolio-fse' },
+        themeResolvedContent: { themeSlug: 'profolio-fse' },
+      },
+      {
+        themeJsonSummary: { templatePartAreas: [] },
+        structureHints: {
+          entrySourceChains: [
+            {
+              entryFile: 'patterns/front-page.php',
+              routeHint: 'front-page',
+              chainFiles: ['patterns/front-page.php'],
+              composedSource:
+                '<!-- wp:pattern {"slug":"profolio-fse/banner"} /--><!-- wp:pattern {"slug":"profolio-fse/projects"} /-->',
+              assetFiles: [],
+              runtimeFiles: [],
+              blockTypes: ['core/pattern', 'core/cover', 'core/columns'],
+              headingTexts: ['Welcome To My Profile'],
+              notes: [],
+            },
+            {
+              entryFile: 'patterns/template-services.php',
+              routeHint: 'template-services',
+              chainFiles: ['patterns/template-services.php', 'patterns/articles.php'],
+              composedSource:
+                '<!-- wp:pattern {"slug":"profolio-fse/services"} /--><!-- wp:query {"query":{"postType":"post"}} /-->',
+              assetFiles: [],
+              runtimeFiles: [],
+              blockTypes: ['core/pattern', 'core/query'],
+              headingTexts: ['Recent Blog Posts'],
+              notes: ['Nested pattern expansion: profolio-fse/articles'],
+            },
+          ],
+        },
+      },
+    );
+
+    expect(enriched[0]?.dataNeeds).toEqual([]);
+    expect(enriched[1]?.dataNeeds).toEqual(['posts']);
+  });
+
   it('merges repo archetype supplemental sources for profolio fixed page bindings', () => {
     const fusionService = new PlannerService(
       { getModel: () => 'test-model' } as any,

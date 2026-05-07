@@ -193,6 +193,119 @@ describe('CodeGeneratorService', () => {
     expect(code).toContain('Proceed to checkout');
   });
 
+  it('preserves WooCommerce cart source literals in deterministic cart output', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'Cart',
+      renderMode: 'hybrid',
+      sections: [],
+      blockTree: [
+        {
+          kind: 'cart',
+          blockName: 'woocommerce/cart',
+          children: [
+            {
+              kind: 'filled-cart-block',
+              children: [
+                {
+                  kind: 'cart-cross-sells-block',
+                  children: [
+                    {
+                      kind: 'heading',
+                      text: 'You may be interested in…',
+                      level: 2,
+                    },
+                    {
+                      kind: 'cart-cross-sells-products-block',
+                    },
+                  ],
+                },
+              ],
+            },
+            {
+              kind: 'empty-cart-block',
+              children: [
+                {
+                  kind: 'heading',
+                  text: 'Your cart is currently empty!',
+                  level: 2,
+                },
+                {
+                  kind: 'heading',
+                  text: 'New in store',
+                  level: 2,
+                },
+                {
+                  kind: 'product-new',
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain('You may be interested in…');
+    expect(code).toContain('Your cart is currently empty!');
+    expect(code).toContain('New in store');
+    expect(code).toContain("fetch('/api/post-types/product/posts')");
+    expect(code).toContain('import { Link }');
+  });
+
+  it('preserves source column widths when hybrid sidebar sections replace column children', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'BlogLeftSidebar',
+      dataNeeds: ['posts'],
+      renderMode: 'hybrid',
+      sections: [
+        {
+          type: 'sidebar',
+          debugKey: 'latest-posts',
+          widgets: [{ kind: 'recent-posts', title: 'Latest Posts' }],
+        },
+        {
+          type: 'post-list',
+          resource: 'posts',
+        },
+      ],
+      blockTree: [
+        {
+          kind: 'columns',
+          children: [
+            {
+              kind: 'column',
+              columnWidth: '30%',
+              children: [
+                {
+                  kind: 'template-part',
+                  templatePartSlug: 'sidebar',
+                },
+              ],
+            },
+            {
+              kind: 'column',
+              columnWidth: '70%',
+              children: [
+                {
+                  kind: 'query',
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain("gridTemplateColumns: '30% 70%'");
+    expect(code).toContain("flex: '0 0 30%'");
+    expect(code).toContain("flex: '0 0 70%'");
+  });
+
   it('preserves source search descendants instead of collapsing wrapper sections in hybrid output', () => {
     const plan = {
       ...basePlan,
@@ -356,6 +469,45 @@ describe('CodeGeneratorService', () => {
 
     expect(code).toContain('item?.tags');
     expect(code).not.toContain('item?.categories');
+  });
+
+  it('renders WooCommerce product query block-tree nodes from products, not posts', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'SingleProduct',
+      dataNeeds: ['productDetail', 'products'],
+      renderMode: 'hybrid',
+      sections: [],
+      blockTree: [
+        {
+          kind: 'query',
+          blockName: 'core/query',
+          children: [
+            {
+              kind: 'post-template',
+              blockName: 'core/post-template',
+              children: [
+                {
+                  kind: 'product-image',
+                  blockName: 'woocommerce/product-image',
+                },
+                {
+                  kind: 'product-price',
+                  blockName: 'woocommerce/product-price',
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain('const [products, setProducts] = useState<Product[]>([]);');
+    expect(code).toContain('products.slice(0, 5).map((product)');
+    expect(code).toContain("'/product/' + product.slug");
+    expect(code).not.toContain('posts.slice(0, 5).map((post)');
   });
 
   it('renders CTA text for search sections', () => {
@@ -1167,23 +1319,23 @@ describe('CodeGeneratorService', () => {
                   blockName: 'column',
                   columnWidth: '45%',
                   children: [
-            {
-              kind: 'heading',
-              blockName: 'heading',
-              text: "Let's Work Together",
-            },
-            {
-              kind: 'social-links',
-              blockName: 'social-links',
-              children: [
-                {
-                  kind: 'social-link',
-                  blockName: 'social-link',
-                  text: 'Facebook',
-                  attrs: { service: 'facebook', url: '#' },
-                },
-              ],
-            },
+                    {
+                      kind: 'heading',
+                      blockName: 'heading',
+                      text: "Let's Work Together",
+                    },
+                    {
+                      kind: 'social-links',
+                      blockName: 'social-links',
+                      children: [
+                        {
+                          kind: 'social-link',
+                          blockName: 'social-link',
+                          text: 'Facebook',
+                          attrs: { service: 'facebook', url: '#' },
+                        },
+                      ],
+                    },
                   ],
                 },
                 {
@@ -1230,8 +1382,12 @@ describe('CodeGeneratorService', () => {
     expect(code).toContain('<ul className="wp-block-social-links');
     expect(code).toContain('wp-social-link-facebook');
     expect(code).toContain('facebook');
-    expect(code).toContain('<figure className="wp-block-image size-full is-resized"');
-    expect(code).toContain('resolveAsset("theme-asset:/assets/images/arrow-up.png")');
+    expect(code).toContain(
+      '<figure className="wp-block-image size-full is-resized"',
+    );
+    expect(code).toContain(
+      'resolveAsset("theme-asset:/assets/images/arrow-up.png")',
+    );
     expect(code).toContain('Contact');
   });
 

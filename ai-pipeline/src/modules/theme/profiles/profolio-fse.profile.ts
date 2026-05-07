@@ -5,11 +5,7 @@ export const PROFOLIO_FSE_THEME_PROFILE: ThemeProfile = {
   kind: 'fse',
   slug: 'profolio-fse',
   label: 'Profolio FSE',
-  sourceFaithfulComponents: [
-    'Header',
-    'Footer',
-    'Sidebar',
-  ],
+  sourceFaithfulComponents: ['Header', 'Footer', 'Sidebar'],
   sharedChromeMode: 'block-tree-first',
   motionHooks: [
     'wow',

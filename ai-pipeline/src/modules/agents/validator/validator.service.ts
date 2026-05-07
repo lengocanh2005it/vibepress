@@ -321,10 +321,17 @@ export class ValidatorService {
 
     return raw.replace(
       /<([A-Za-z][A-Za-z0-9.]*)\b([^<>]*?)\bclassName=(["'])([^"']*)\3/g,
-      (match, rawTag: string, beforeClass: string, quote: string, classValue: string) => {
+      (
+        match,
+        rawTag: string,
+        beforeClass: string,
+        quote: string,
+        classValue: string,
+      ) => {
         if (!hookPattern.test(classValue)) return match;
 
-        const tag = rawTag.split('.').pop()?.toLowerCase() ?? rawTag.toLowerCase();
+        const tag =
+          rawTag.split('.').pop()?.toLowerCase() ?? rawTag.toLowerCase();
         const isScrollTopTriggerTag =
           tag === 'p' || tag === 'a' || tag === 'button';
         const classNames = classValue.split(/\s+/).filter(Boolean);
@@ -3369,7 +3376,9 @@ export class ValidatorService {
               code,
             );
           case 'featuredImage':
-            return /\b[A-Za-z_$][\w$]*(?:\??\.)+featuredImage\b|<img\b/i.test(code);
+            return /\b[A-Za-z_$][\w$]*(?:\??\.)+featuredImage\b|<img\b/i.test(
+              code,
+            );
           case 'tags':
             return /\b[A-Za-z_$][\w$]*(?:\??\.)+tags\b/i.test(code);
           default:

@@ -1902,6 +1902,9 @@ function buildImageSourcesNote(templateSource: string): string {
     'When any approved text field such as `subheading`, `subtitle`, `body`, `quote`, or card body contains inline HTML tags like `<strong>`, `<em>`, or `<a>`, preserve that markup in the rendered JSX instead of flattening it to plain text. Prefer `renderRichTextChildren(...)` or equivalent structured JSX instead of `dangerouslySetInnerHTML`.',
   );
   lines.push(
+    'For `post.content`, `page.content`, and `item.content`, `renderRichTextChildren` must parse the HTML string and recursively map each ChildNode into concrete React nodes/tags (`p`, `h1`-`h6`, `ul`, `ol`, `li`, `a`, `img`, `strong`, `em`, `mark`, etc.). Do not return raw HTML and do not use any `innerHTML` API.',
+  );
+  lines.push(
     'When preserving inline markup, keep the wrapper tag explicit and semantic. Good: `<p>{renderRichTextChildren(...)}</p>`, `<div>{renderRichTextChildren(...)}</div>`, `<h2>{renderRichTextChildren(...)}</h2>`, `<li>{renderRichTextChildren(...)}</li>`.',
   );
 
@@ -3369,6 +3372,7 @@ function buildInlineSectionBehaviorChecklist(section: SectionPlan): string {
         '## Section behavior contract',
         '- This is the ONLY place that should render `post.content` or `item.content` for the canonical post body.',
         '- Render the post body through `renderRichTextChildren(post.content, ...)` or equivalent structured JSX rich-text nodes inside this section ONLY; do NOT use `dangerouslySetInnerHTML` for post content.',
+        '- The rich-text renderer must parse `post.content`/`item.content` and recursively render each HTML node as concrete React elements (`p`, headings, lists, links, images, emphasis). It must not expose raw HTML.',
         '- Do NOT also render other source-backed sections (prose-block, card-grid, media-text, etc.) as additional body sections — that would be duplication.',
         '- Do NOT render `post.content` outside of this section element.',
       ].join('\n');
@@ -3377,6 +3381,7 @@ function buildInlineSectionBehaviorChecklist(section: SectionPlan): string {
         '## Section behavior contract',
         '- This is the ONLY place that should render `page.content` or `item.content`.',
         '- Render the page body through `renderRichTextChildren(page.content, ...)` or equivalent structured JSX rich-text nodes inside this section ONLY; do NOT use `dangerouslySetInnerHTML` for page content.',
+        '- The rich-text renderer must parse `page.content`/`item.content` and recursively render each HTML node as concrete React elements (`p`, headings, lists, links, images, emphasis). It must not expose raw HTML.',
         '- Do NOT also render other source-backed sections (prose-block, card-grid, media-text, etc.) as additional body sections — that would be duplication.',
         '- Do NOT render `page.content` outside of this section element.',
       ].join('\n');
