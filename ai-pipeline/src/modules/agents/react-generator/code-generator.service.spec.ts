@@ -505,7 +505,9 @@ describe('CodeGeneratorService', () => {
 
     const code = service.generate(plan);
 
-    expect(code).toContain('const [products, setProducts] = useState<Product[]>([]);');
+    expect(code).toContain(
+      'const [products, setProducts] = useState<Product[]>([]);',
+    );
     expect(code).toContain('products.slice(0, 5).map((product)');
     expect(code).toContain("'/product/' + product.slug");
     expect(code).toContain('products-block-post-template');

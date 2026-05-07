@@ -195,7 +195,10 @@ describe('PlannerService shared chrome visual plans', () => {
             {
               entryFile: 'patterns/single-product.php',
               routeHint: 'single-product',
-              chainFiles: ['templates/single-product.html', 'patterns/single-product.php'],
+              chainFiles: [
+                'templates/single-product.html',
+                'patterns/single-product.php',
+              ],
               composedSource:
                 '<!-- wp:woocommerce/product-image /--><!-- wp:woocommerce/add-to-cart-form /--><!-- wp:woocommerce/related-products /-->',
               assetFiles: [],
@@ -239,7 +242,10 @@ describe('PlannerService shared chrome visual plans', () => {
         },
       ],
       new Map<string, string>([
-        ['front-page', '<!-- wp:pattern {"slug":"profolio-fse/front-page"} /-->'],
+        [
+          'front-page',
+          '<!-- wp:pattern {"slug":"profolio-fse/front-page"} /-->',
+        ],
         [
           'template-services',
           '<!-- wp:pattern {"slug":"profolio-fse/services-page"} /-->',
@@ -268,7 +274,10 @@ describe('PlannerService shared chrome visual plans', () => {
             {
               entryFile: 'patterns/template-services.php',
               routeHint: 'template-services',
-              chainFiles: ['patterns/template-services.php', 'patterns/articles.php'],
+              chainFiles: [
+                'patterns/template-services.php',
+                'patterns/articles.php',
+              ],
               composedSource:
                 '<!-- wp:pattern {"slug":"profolio-fse/services"} /--><!-- wp:query {"query":{"postType":"post"}} /-->',
               assetFiles: [],
@@ -704,5 +713,127 @@ describe('PlannerService expected FSE template scoping', () => {
     expect(templateNames).not.toContain('archive-product');
     expect(templateNames).not.toContain('newsletter');
     expect(templateNames).not.toContain('archive');
+  });
+
+  it('does not keep Woo templates from product records alone', () => {
+    const service = createService();
+    const theme = {
+      type: 'fse',
+      templates: [
+        { name: 'front-page', markup: '<main>Home</main>' },
+        { name: 'single-product', markup: '<main>Product detail</main>' },
+        { name: 'archive-product', markup: '<main>Products</main>' },
+      ],
+      parts: [],
+      tokens: undefined,
+    } as any;
+    const content = {
+      pages: [
+        { id: 1, slug: 'home', title: 'Home', template: '', content: '' },
+      ],
+      posts: [],
+      dbTemplates: [],
+      dbNavigations: [],
+      dbGlobalStyles: [],
+      parsedGlobalStyles: null,
+      customCssEntries: [],
+      taxonomies: [],
+      mediaAttachments: [],
+      plugins: [],
+      customPostTypes: [{ postType: 'product', count: 2, taxonomies: [] }],
+      capabilities: { activePluginSlugs: [] },
+      readingSettings: {
+        showOnFront: 'page',
+        pageOnFrontId: 1,
+        pageForPostsId: null,
+      },
+      themeResolvedContent: {
+        themeSlug: 'generic-fse',
+        routes: [
+          {
+            pageId: 1,
+            slug: 'home',
+            title: 'Home',
+            routePath: '/',
+            template: '',
+            templateCandidates: ['front-page', 'page'],
+            matchedDbTemplateSlugs: [],
+            pageBlockTypes: [],
+            isFrontPage: true,
+            isPostsPage: false,
+          },
+        ],
+      },
+    } as any;
+
+    const templateNames = service.getExpectedTemplateNames(theme, content);
+
+    expect(templateNames).toContain('front-page');
+    expect(templateNames).not.toContain('archive-product');
+    expect(templateNames).not.toContain('single-product');
+  });
+
+  it('keeps Woo templates only when runtime route evidence points to them', () => {
+    const service = createService();
+    const theme = {
+      type: 'fse',
+      templates: [
+        { name: 'front-page', markup: '<main>Home</main>' },
+        { name: 'single-product', markup: '<main>Product detail</main>' },
+        { name: 'archive-product', markup: '<main>Products</main>' },
+      ],
+      parts: [],
+      tokens: undefined,
+    } as any;
+    const content = {
+      pages: [
+        {
+          id: 1,
+          slug: 'home',
+          title: 'Home',
+          template: '',
+          content:
+            '<a href="/shop/">Shop</a><a href="/product/san-pham-1/">Product</a>',
+        },
+      ],
+      posts: [],
+      dbTemplates: [],
+      dbNavigations: [],
+      dbGlobalStyles: [],
+      parsedGlobalStyles: null,
+      customCssEntries: [],
+      taxonomies: [],
+      mediaAttachments: [],
+      plugins: [],
+      customPostTypes: [{ postType: 'product', count: 2, taxonomies: [] }],
+      capabilities: { activePluginSlugs: [] },
+      readingSettings: {
+        showOnFront: 'page',
+        pageOnFrontId: 1,
+        pageForPostsId: null,
+      },
+      themeResolvedContent: {
+        themeSlug: 'generic-fse',
+        routes: [
+          {
+            pageId: 1,
+            slug: 'home',
+            title: 'Home',
+            routePath: '/',
+            template: '',
+            templateCandidates: ['front-page', 'page'],
+            matchedDbTemplateSlugs: [],
+            pageBlockTypes: [],
+            isFrontPage: true,
+            isPostsPage: false,
+          },
+        ],
+      },
+    } as any;
+
+    const templateNames = service.getExpectedTemplateNames(theme, content);
+
+    expect(templateNames).toContain('archive-product');
+    expect(templateNames).toContain('single-product');
   });
 });

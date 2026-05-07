@@ -63,8 +63,7 @@ export class GeneratedCodeReviewService {
     const { components, plan, modelName, mode = 'warn', logPath } = input;
     const resolvedModel = modelName ?? this.llmFactory.getModel();
     const reviewableComponents = components.filter(
-      (comp) =>
-        !comp.isSubComponent || comp.generationMode !== 'deterministic',
+      (comp) => !comp.isSubComponent || comp.generationMode !== 'deterministic',
     );
     const failures: { componentName: string; message: string }[] = [];
 
@@ -79,10 +78,7 @@ export class GeneratedCodeReviewService {
     for (const component of reviewableComponents) {
       const contract =
         plan.find((item) => item.componentName === component.name) ?? null;
-      const reviewTarget = this.expandComponentTreeForReview(
-        component,
-        components,
-      );
+      const reviewTarget = component;
       const reviewed = await this.reviewComponent(
         reviewTarget,
         contract,
@@ -315,61 +311,6 @@ ${component.code}
 \`\`\``;
   }
 
-  private expandComponentTreeForReview(
-    component: GeneratedComponent,
-    components: GeneratedComponent[],
-  ): GeneratedComponent {
-    const byName = new Map(components.map((item) => [item.name, item]));
-    const visited = new Set<string>();
-    const chunks: string[] = [];
-
-    const collect = (current: GeneratedComponent) => {
-      if (visited.has(current.name)) return;
-      visited.add(current.name);
-      chunks.push(
-        current.name === component.name
-          ? current.code
-          : `// Imported generated subcomponent: ${current.name}\n${current.code}`,
-      );
-      for (const importedName of this.extractGeneratedComponentImports(
-        current.code,
-      )) {
-        const imported = byName.get(importedName);
-        if (imported) collect(imported);
-      }
-    };
-
-    collect(component);
-    if (chunks.length <= 1) return component;
-    return {
-      ...component,
-      code: chunks.join('\n\n/* generated import boundary */\n\n'),
-    };
-  }
-
-  private extractGeneratedComponentImports(code: string): string[] {
-    const names: string[] = [];
-    const matches = [
-      ...code.matchAll(/import\s+([A-Z][A-Za-z0-9]*)\s+from\s+['"]([^'"]+)['"]/g),
-    ];
-    for (const match of matches) {
-      const localName = match[1];
-      const importPath = match[2];
-      if (!importPath.startsWith('./') && !importPath.startsWith('../')) {
-        continue;
-      }
-      const basename = importPath
-        .replace(/^\.\/|^\.\.\//, '')
-        .split('/')
-        .pop()
-        ?.replace(/\.(?:js|jsx|ts|tsx)$/, '');
-      if (basename && basename === localName) {
-        names.push(localName);
-      }
-    }
-    return [...new Set(names)];
-  }
-
   private buildApiContractLines(
     dataNeeds: string[],
     isDetail: boolean,
@@ -523,7 +464,8 @@ ${component.code}
     contract: PlanResult[number] | null,
     visualPlan?: ComponentVisualPlan,
   ): string {
-    const nodes = visualPlan?.blockTree ?? contract?.visualPlan?.blockTree ?? [];
+    const nodes =
+      visualPlan?.blockTree ?? contract?.visualPlan?.blockTree ?? [];
     if (nodes.length === 0) return '- (none)';
 
     const lines: string[] = [];
@@ -595,7 +537,8 @@ ${component.code}
     contract: PlanResult[number] | null,
   ): CodeReviewIssue[] {
     const issues: CodeReviewIssue[] = [];
-    const sections = contract?.visualPlan?.sections ?? component.visualPlan?.sections ?? [];
+    const sections =
+      contract?.visualPlan?.sections ?? component.visualPlan?.sections ?? [];
     const normalizedCode = this.normalizeForTextMatch(component.code);
     const isPageComponent = (contract?.type ?? component.type) === 'page';
     const fixedSlug = contract?.fixedSlug ?? component.fixedSlug ?? null;

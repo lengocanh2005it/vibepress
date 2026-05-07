@@ -5,9 +5,7 @@ import type { ComponentVisualPlan } from './visual-plan.schema.js';
 describe('GeneratedCodeReviewService', () => {
   it('reviews source child components with their own visual plan and treats source omissions as blocking', async () => {
     const chat = jest.fn(async ({ userPrompt }: { userPrompt: string }) => {
-      const isChild = userPrompt.includes(
-        'componentName: FrontPageProjects',
-      );
+      const isChild = userPrompt.includes('componentName: FrontPageProjects');
       return {
         text: JSON.stringify(
           isChild
@@ -108,10 +106,20 @@ describe('GeneratedCodeReviewService', () => {
     });
 
     expect(chat).toHaveBeenCalledTimes(2);
+    const parentPrompt = chat.mock.calls
+      .map(([arg]) => arg.userPrompt as string)
+      .find((prompt) => prompt.includes('componentName: FrontPage'));
     const childPrompt = chat.mock.calls
       .map(([arg]) => arg.userPrompt as string)
       .find((prompt) => prompt.includes('componentName: FrontPageProjects'));
 
+    expect(parentPrompt).toContain(
+      "import FrontPageProjects from '../components/FrontPageProjects';",
+    );
+    expect(parentPrompt).not.toContain('Imported generated subcomponent');
+    expect(parentPrompt).not.toContain(
+      'export default function FrontPageProjects',
+    );
     expect(childPrompt).toContain('dataNeeds describe props supplied');
     expect(childPrompt).toContain('card-grid title="My Projects"');
     expect(childPrompt).toContain('AI Based Social Networks');

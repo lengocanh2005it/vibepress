@@ -4423,13 +4423,17 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
       return chunks;
     };
 
-    return collect(component).join('\n\n/* imported generated component */\n\n');
+    return collect(component).join(
+      '\n\n/* imported generated component */\n\n',
+    );
   }
 
   private extractGeneratedComponentImports(code: string): string[] {
     const names: string[] = [];
     const matches = [
-      ...code.matchAll(/import\s+([A-Z][A-Za-z0-9]*)\s+from\s+['"]([^'"]+)['"]/g),
+      ...code.matchAll(
+        /import\s+([A-Z][A-Za-z0-9]*)\s+from\s+['"]([^'"]+)['"]/g,
+      ),
     ];
     for (const match of matches) {
       const localName = match[1];

@@ -636,10 +636,7 @@ function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
   if (block === 'core/comments' || block === 'comments') {
     return toMappedSections(mapComments(node), node);
   }
-  if (
-    block === 'core/post-comments-form' ||
-    block === 'post-comments-form'
-  ) {
+  if (block === 'core/post-comments-form' || block === 'post-comments-form') {
     return toMappedSections(mapPostCommentsForm(node), node);
   }
 
@@ -854,10 +851,8 @@ function profolioBannerSections(): SectionPlan[] {
       type: 'media-text',
       debugKey: 'banner',
       subtitle: 'About Me',
-      heading:
-        'Welcome To My Profile <br>I am <mark>Julia Henderson</mark>',
-      body:
-        'Mattis pellentesque ex phasellus amet nulla aliquam commodo eu posuere in sit efficitur per libero consectetuer id elit neque condimentum parturient Adipiscing ipsum netus donec erat vivamus congue eget fermentum',
+      heading: 'Welcome To My Profile <br>I am <mark>Julia Henderson</mark>',
+      body: 'Mattis pellentesque ex phasellus amet nulla aliquam commodo eu posuere in sit efficitur per libero consectetuer id elit neque condimentum parturient Adipiscing ipsum netus donec erat vivamus congue eget fermentum',
       imageSrc: 'theme-asset:/assets/images/banner-image.png',
       imageAlt: '',
       imagePosition: 'right',
@@ -880,29 +875,25 @@ function profolioProjectsSections(): SectionPlan[] {
       cards: [
         {
           heading: 'Design of a mobile app develops',
-          body:
-            'Nullam maecenas gravida suscipit potenti lorem eros si tincidunt litora imperdiet maximus dapibus eu hendrerit tempus cras adipiscing faucibus sem consectetur platea justo euismod',
+          body: 'Nullam maecenas gravida suscipit potenti lorem eros si tincidunt litora imperdiet maximus dapibus eu hendrerit tempus cras adipiscing faucibus sem consectetur platea justo euismod',
           imageSrc: 'theme-asset:/assets/images/projects-1.jpg',
           imageAlt: '',
         },
         {
           heading: 'AI Based Social Networks',
-          body:
-            'Nullam maecenas gravida suscipit potenti lorem eros si tincidunt litora imperdiet maximus dapibus eu hendrerit tempus cras adipiscing faucibus sem consectetur platea justo euismod',
+          body: 'Nullam maecenas gravida suscipit potenti lorem eros si tincidunt litora imperdiet maximus dapibus eu hendrerit tempus cras adipiscing faucibus sem consectetur platea justo euismod',
           imageSrc: 'theme-asset:/assets/images/projects-2.jpg',
           imageAlt: '',
         },
         {
           heading: 'NFT Buy and Sell Platform',
-          body:
-            'Nullam maecenas gravida suscipit potenti lorem eros si tincidunt litora imperdiet maximus dapibus eu hendrerit tempus cras adipiscing faucibus sem consectetur platea justo euismod',
+          body: 'Nullam maecenas gravida suscipit potenti lorem eros si tincidunt litora imperdiet maximus dapibus eu hendrerit tempus cras adipiscing faucibus sem consectetur platea justo euismod',
           imageSrc: 'theme-asset:/assets/images/projects-3.jpg',
           imageAlt: '',
         },
         {
           heading: 'Web Traffic Management',
-          body:
-            'Nullam maecenas gravida suscipit potenti lorem eros si tincidunt litora imperdiet maximus dapibus eu hendrerit tempus cras adipiscing faucibus sem consectetur platea justo euismod',
+          body: 'Nullam maecenas gravida suscipit potenti lorem eros si tincidunt litora imperdiet maximus dapibus eu hendrerit tempus cras adipiscing faucibus sem consectetur platea justo euismod',
         },
       ],
     },
@@ -964,8 +955,7 @@ function profolioExperienceSections(): SectionPlan[] {
       debugKey: 'experience',
       subtitle: 'Experience',
       heading: 'Lead Product and Designer and Art Director',
-      body:
-        'Mattis pellentesque ex phasellus amet nulla aliquam commodo eu posuere in sit efficitur per libero consectetuer id elit neque condimentum parturient',
+      body: 'Mattis pellentesque ex phasellus amet nulla aliquam commodo eu posuere in sit efficitur per libero consectetuer id elit neque condimentum parturient',
       imageSrc: 'theme-asset:/assets/images/experience.jpg',
       imageAlt: '',
       imagePosition: 'left',
@@ -1092,8 +1082,7 @@ function profolioContactSections(): SectionPlan[] {
       debugKey: 'lets-work-together',
       subtitle: 'Contact',
       heading: "Let's Work Together",
-      body:
-        'Mattis pellentesque ex phasellus amet nulla aliquam commodo eu posuere in sit efficitur per libero consectetuer id elit neque condimentum parturient',
+      body: 'Mattis pellentesque ex phasellus amet nulla aliquam commodo eu posuere in sit efficitur per libero consectetuer id elit neque condimentum parturient',
       imageSrc: '',
       imageAlt: '',
       imagePosition: 'right',

@@ -940,8 +940,9 @@ describe('planning-source-policy util', () => {
     });
 
     expect(candidates[0]?.label).toBe('repo-archetype:front-page');
-    expect(candidates.some((candidate) => candidate.label.startsWith('db:')))
-      .toBe(true);
+    expect(
+      candidates.some((candidate) => candidate.label.startsWith('db:')),
+    ).toBe(true);
   });
 
   it('does not let representative DB posts override profolio generic single-post layout planning', () => {
@@ -961,10 +962,7 @@ describe('planning-source-policy util', () => {
           {
             entryFile: 'templates/single.html',
             routeHint: 'single',
-            chainFiles: [
-              'templates/single.html',
-              'patterns/single-post.php',
-            ],
+            chainFiles: ['templates/single.html', 'patterns/single-post.php'],
             composedSource:
               '<!-- wp:pattern {"slug":"profolio-fse/single-post"} /-->',
             assetFiles: [],
@@ -1032,7 +1030,8 @@ describe('planning-source-policy util', () => {
     });
 
     expect(candidates[0]?.label).toBe('repo-archetype:single');
-    expect(candidates.some((candidate) => candidate.label === 'db:post:abcdef'))
-      .toBe(false);
+    expect(
+      candidates.some((candidate) => candidate.label === 'db:post:abcdef'),
+    ).toBe(false);
   });
 });
