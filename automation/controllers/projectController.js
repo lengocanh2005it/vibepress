@@ -1151,8 +1151,9 @@ function logPreviewSourceContext({
 function rewriteWpHttpUrls(text, wpOrigin) {
   const proxyPrefix = `/api/wp/proxy-asset?url=${encodeURIComponent(wpOrigin)}`;
 
-  // 1. Rewrite absolute "http://WP_ORIGIN/..." occurrences (src=, href=, url(), JS strings)
-  text = text.split(wpOrigin).join(proxyPrefix);
+  // Steps 2 & 3 run first so root-relative paths get proxied before step 1 turns
+  // absolute URLs into relative proxy paths — prevents step 2/3 from double-wrapping
+  // paths that step 1 already rewrote (e.g. /api/wp/proxy-asset?url=... → proxied again).
 
   // 2. Rewrite root-relative asset attributes: src="/...", srcset="/...", data-src="/..."
   //    Leave href="/" for <a> navigation links — only rewrite non-anchor asset attrs.
@@ -1166,6 +1167,9 @@ function rewriteWpHttpUrls(text, wpOrigin) {
     /\burl\(\s*(['"]?)\/(?![/"'])/g,
     (_, quote) => `url(${quote || "'"}${proxyPrefix}/`,
   );
+
+  // 1. Rewrite absolute "http://WP_ORIGIN/..." occurrences (src=, href=, url(), JS strings)
+  text = text.split(wpOrigin).join(proxyPrefix);
 
   return text;
 }
