@@ -306,7 +306,7 @@ describe('CodeReviewerService section assembly policy', () => {
     expect(decision.reason).toContain('pinned to section assembly');
   });
 
-  it('pins profolio-fse FrontPage to section assembly instead of source-faithful deterministic rendering', () => {
+  it('does not use section assembly for profolio-fse FrontPage because source-cluster composition owns it', () => {
     const decision = (
       service as unknown as {
         getSectionLevelAssemblyDecision: (
@@ -348,8 +348,8 @@ describe('CodeReviewerService section assembly policy', () => {
       },
     );
 
-    expect(decision.enabled).toBe(true);
-    expect(decision.reason).toContain('pinned to section assembly');
+    expect(decision.enabled).toBe(false);
+    expect(decision.reason).toContain('source-cluster child component');
   });
 
   it('does not prefer deterministic-first for complex homepage/page templates', () => {

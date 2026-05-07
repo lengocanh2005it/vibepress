@@ -332,6 +332,11 @@ describe('ReactGeneratorService source-faithful page policy', () => {
             sourceRef: { sourceNodeId: 'front-page::group::1.0.1' },
           },
           {
+            type: 'post-list',
+            title: 'Latest Work',
+            sourceRef: { sourceNodeId: 'front-page::group::1.0.2' },
+          },
+          {
             type: 'media-text',
             heading: 'UI/UX Design',
             sourceRef: { sourceNodeId: 'front-page::columns::1.1.1.0' },
@@ -412,6 +417,10 @@ describe('ReactGeneratorService source-faithful page policy', () => {
     expect(result[0].code).toContain(
       "import FrontPageProjects from '../components/FrontPageProjects';",
     );
+    expect(result[0].code).toContain("fetch('/api/posts')");
+    expect(result[0].code).toContain(
+      '<FrontPageProjects posts={posts} loading={loading} error={error} />',
+    );
     expect(result[0].code).toContain('<FrontPageSkills />');
     expect(result.slice(1).every((component) => component.isSubComponent)).toBe(
       true,
@@ -419,7 +428,7 @@ describe('ReactGeneratorService source-faithful page policy', () => {
     expect(
       result.find((component) => component.name === 'FrontPageProjects')
         ?.visualPlan?.sections,
-    ).toHaveLength(1);
+    ).toHaveLength(2);
     expect(
       result.find((component) => component.name === 'FrontPageServices')
         ?.visualPlan?.sections,
@@ -427,16 +436,428 @@ describe('ReactGeneratorService source-faithful page policy', () => {
     expect(
       result.find((component) => component.name === 'FrontPageProjects')
         ?.dataNeeds,
-    ).toEqual([]);
+    ).toEqual(['posts']);
     expect(codeReviewer.reviewSection).toHaveBeenCalledWith(
       expect.objectContaining({
         sectionName: 'FrontPageProjects',
         componentPlan: expect.objectContaining({
-          dataNeeds: [],
-          visualPlan: expect.objectContaining({ dataNeeds: [] }),
+          dataNeeds: ['posts'],
+          visualPlan: expect.objectContaining({ dataNeeds: ['posts'] }),
         }),
       }),
     );
+  });
+
+  it('composes profolio-fse template pages from generic source-bound child components', async () => {
+    const codeGenerator = {
+      generate: jest.fn(),
+      generateBlockFaithfulPartial: jest.fn(),
+    } as unknown as CodeGeneratorService;
+    const codeReviewer = {
+      reviewComponent: jest.fn(),
+      reviewSection: jest.fn(async ({ sectionName }: { sectionName: string }) => ({
+        name: sectionName,
+        filePath: '',
+        code: `export default function ${sectionName}(){return <section>${sectionName}</section>;}`,
+        isSubComponent: true,
+      })),
+    } as unknown as CodeReviewerService;
+    const service = new ReactGeneratorService(
+      { getModel: jest.fn(() => 'gpt-test') } as never,
+      { get: jest.fn() } as never,
+      { resolve: jest.fn() } as never,
+      codeGenerator,
+      codeReviewer,
+      {} as never,
+    );
+
+    const componentPlan = {
+      componentName: 'TemplateAbout',
+      templateName: 'template-about',
+      type: 'page',
+      route: '/about',
+      dataNeeds: [],
+      isDetail: false,
+      description: 'About',
+      visualPlan: {
+        componentName: 'TemplateAbout',
+        renderMode: 'hybrid',
+        dataNeeds: [],
+        palette: {} as never,
+        typography: {} as never,
+        layout: {} as never,
+        sections: [
+          {
+            type: 'cover',
+            heading: 'About Me',
+            sourceRef: {
+              sourceNodeId: 'template-about::cover::0.0',
+              parentSourceNodeId: 'template-about::group::0',
+            },
+          },
+          {
+            type: 'media-text',
+            heading: 'My Experience',
+            sourceRef: {
+              sourceNodeId: 'template-about::columns::1.0',
+              parentSourceNodeId: 'template-about::group::1',
+            },
+          },
+        ],
+        blockTree: [
+          {
+            kind: 'group',
+            blockName: 'core/group',
+            sourceRef: { sourceNodeId: 'template-about::group::0' },
+            children: [
+              {
+                kind: 'cover',
+                blockName: 'core/cover',
+                sourceRef: { sourceNodeId: 'template-about::cover::0.0' },
+                children: [],
+              },
+            ],
+          },
+          {
+            kind: 'group',
+            blockName: 'core/group',
+            sourceRef: { sourceNodeId: 'template-about::group::1' },
+            children: [
+              {
+                kind: 'columns',
+                blockName: 'core/columns',
+                sourceRef: { sourceNodeId: 'template-about::columns::1.0' },
+                children: [],
+              },
+            ],
+          },
+        ],
+      },
+    } as any;
+
+    const result = await (
+      service as unknown as {
+        generateForTemplate: (input: Record<string, unknown>) => Promise<any[]>;
+      }
+    ).generateForTemplate({
+      componentName: 'TemplateAbout',
+      rawSource: '',
+      codeGeneratorModel: 'gpt-test',
+      fixAgentModel: 'gpt-test',
+      systemPrompt: 'test',
+      content: {} as never,
+      themeType: 'fse',
+      componentPlan,
+      repoManifest: {
+        themeTypeHints: { themeSlug: 'profolio-fse' },
+      } as RepoThemeManifest,
+    });
+
+    expect(codeReviewer.reviewComponent).not.toHaveBeenCalled();
+    expect(codeReviewer.reviewSection).toHaveBeenCalledTimes(2);
+    expect(result).toHaveLength(3);
+    expect(result[0]).toMatchObject({
+      name: 'TemplateAbout',
+      route: '/about',
+      generationMode: 'deterministic',
+    });
+    expect(result[0].code).toContain(
+      "import TemplateAboutAboutMe from '../components/TemplateAboutAboutMe';",
+    );
+    expect(result[0].code).toContain('<TemplateAboutAboutMe />');
+    expect(result.slice(1).every((component) => component.isSubComponent)).toBe(
+      true,
+    );
+    expect(result.map((component) => component.name)).toEqual([
+      'TemplateAbout',
+      'TemplateAboutAboutMe',
+      'TemplateAboutMyExperience',
+    ]);
+  });
+
+  it('keeps profolio-fse service sections in separate child components and adds uncovered top-level blocks', async () => {
+    const codeGenerator = {
+      generate: jest.fn(),
+      generateBlockFaithfulPartial: jest.fn(),
+    } as unknown as CodeGeneratorService;
+    const codeReviewer = {
+      reviewComponent: jest.fn(),
+      reviewSection: jest.fn(async ({ sectionName }: { sectionName: string }) => ({
+        name: sectionName,
+        filePath: '',
+        code: `export default function ${sectionName}(){return <section>${sectionName}</section>;}`,
+        isSubComponent: true,
+      })),
+    } as unknown as CodeReviewerService;
+    const service = new ReactGeneratorService(
+      { getModel: jest.fn(() => 'gpt-test') } as never,
+      { get: jest.fn() } as never,
+      { resolve: jest.fn() } as never,
+      codeGenerator,
+      codeReviewer,
+      {} as never,
+    );
+
+    const componentPlan = {
+      componentName: 'TemplateServices',
+      templateName: 'template-services',
+      type: 'page',
+      route: '/services',
+      dataNeeds: [],
+      isDetail: false,
+      description: 'Services',
+      visualPlan: {
+        componentName: 'TemplateServices',
+        renderMode: 'hybrid',
+        dataNeeds: [],
+        palette: {} as never,
+        typography: {} as never,
+        layout: {} as never,
+        sections: [
+          {
+            type: 'media-text',
+            heading: 'UI/UX Design',
+            sourceRef: {
+              sourceNodeId: 'template-services::columns::0.1.0',
+              parentSourceNodeId: 'template-services::group::0.1',
+            },
+          },
+          {
+            type: 'media-text',
+            heading: 'Graphic Design',
+            sourceRef: {
+              sourceNodeId: 'template-services::columns::0.1.1',
+              parentSourceNodeId: 'template-services::group::0.1',
+            },
+          },
+          {
+            type: 'media-text',
+            heading: 'Product Design',
+            sourceRef: {
+              sourceNodeId: 'template-services::columns::0.1.2',
+              parentSourceNodeId: 'template-services::group::0.1',
+            },
+          },
+          {
+            type: 'accordion',
+            items: [{ heading: 'Question', body: 'Answer' }],
+            sourceRef: {
+              sourceNodeId: 'template-services::group::2.0',
+              parentSourceNodeId: 'template-services::group::2',
+            },
+          },
+        ],
+        blockTree: [
+          {
+            kind: 'group',
+            blockName: 'core/group',
+            sourceRef: { sourceNodeId: 'template-services::group::0' },
+            children: [
+              {
+                kind: 'group',
+                blockName: 'core/group',
+                sourceRef: { sourceNodeId: 'template-services::group::0.1' },
+                children: [
+                  {
+                    kind: 'columns',
+                    blockName: 'core/columns',
+                    sourceRef: {
+                      sourceNodeId: 'template-services::columns::0.1.0',
+                    },
+                    children: [],
+                  },
+                  {
+                    kind: 'columns',
+                    blockName: 'core/columns',
+                    sourceRef: {
+                      sourceNodeId: 'template-services::columns::0.1.1',
+                    },
+                    children: [],
+                  },
+                  {
+                    kind: 'columns',
+                    blockName: 'core/columns',
+                    sourceRef: {
+                      sourceNodeId: 'template-services::columns::0.1.2',
+                    },
+                    children: [],
+                  },
+                ],
+              },
+            ],
+          },
+          {
+            kind: 'group',
+            blockName: 'core/group',
+            attrs: { metadata: { name: 'FAQ' } },
+            sourceRef: { sourceNodeId: 'template-services::group::1' },
+            children: [
+              {
+                kind: 'details',
+                blockName: 'core/details',
+                sourceRef: {
+                  sourceNodeId: 'template-services::details::1.1.0.0',
+                },
+                children: [],
+              },
+            ],
+          },
+        ],
+      },
+    } as any;
+
+    const result = await (
+      service as unknown as {
+        generateForTemplate: (input: Record<string, unknown>) => Promise<any[]>;
+      }
+    ).generateForTemplate({
+      componentName: 'TemplateServices',
+      rawSource: '',
+      codeGeneratorModel: 'gpt-test',
+      fixAgentModel: 'gpt-test',
+      systemPrompt: 'test',
+      content: {} as never,
+      themeType: 'fse',
+      componentPlan,
+      repoManifest: {
+        themeTypeHints: { themeSlug: 'profolio-fse' },
+      } as RepoThemeManifest,
+    });
+
+    expect(codeReviewer.reviewComponent).not.toHaveBeenCalled();
+    expect(result.map((component) => component.name)).toEqual([
+      'TemplateServices',
+      'TemplateServicesUIUXDesign',
+      'TemplateServicesGraphicDesign',
+      'TemplateServicesProductDesign',
+      'TemplateServicesFAQ',
+    ]);
+    expect(
+      result.find((component) => component.name === 'TemplateServicesUIUXDesign')
+        ?.visualPlan?.sections,
+    ).toHaveLength(1);
+    expect(
+      result.find(
+        (component) => component.name === 'TemplateServicesGraphicDesign',
+      )?.visualPlan?.sections,
+    ).toHaveLength(1);
+    expect(
+      result.find((component) => component.name === 'TemplateServicesFAQ')
+        ?.visualPlan?.blockTree?.[0]?.sourceRef?.sourceNodeId,
+    ).toBe('template-services::group::1');
+  });
+
+  it('creates child components for uncovered profolio-fse top-level blocks', async () => {
+    const codeGenerator = {
+      generate: jest.fn(),
+      generateBlockFaithfulPartial: jest.fn(),
+    } as unknown as CodeGeneratorService;
+    const codeReviewer = {
+      reviewComponent: jest.fn(),
+      reviewSection: jest.fn(async ({ sectionName }: { sectionName: string }) => ({
+        name: sectionName,
+        filePath: '',
+        code: `export default function ${sectionName}(){return <section>${sectionName}</section>;}`,
+        isSubComponent: true,
+      })),
+    } as unknown as CodeReviewerService;
+    const service = new ReactGeneratorService(
+      { getModel: jest.fn(() => 'gpt-test') } as never,
+      { get: jest.fn() } as never,
+      { resolve: jest.fn() } as never,
+      codeGenerator,
+      codeReviewer,
+      {} as never,
+    );
+
+    const componentPlan = {
+      componentName: 'TemplateContact',
+      templateName: 'template-contact',
+      type: 'page',
+      route: '/contact',
+      dataNeeds: [],
+      isDetail: false,
+      description: 'Contact',
+      visualPlan: {
+        componentName: 'TemplateContact',
+        renderMode: 'hybrid',
+        dataNeeds: [],
+        palette: {} as never,
+        typography: {} as never,
+        layout: {} as never,
+        sections: [
+          {
+            type: 'media-text',
+            heading: "Let's Work Together",
+            sourceRef: {
+              sourceNodeId: 'template-contact::columns::0.0',
+              parentSourceNodeId: 'template-contact::group::0',
+            },
+          },
+        ],
+        blockTree: [
+          {
+            kind: 'group',
+            blockName: 'core/group',
+            attrs: { metadata: { name: 'Contact' } },
+            sourceRef: { sourceNodeId: 'template-contact::group::0' },
+            children: [
+              {
+                kind: 'columns',
+                blockName: 'core/columns',
+                sourceRef: { sourceNodeId: 'template-contact::columns::0.0' },
+                children: [],
+              },
+            ],
+          },
+          {
+            kind: 'group',
+            blockName: 'core/group',
+            attrs: { metadata: { name: 'Testimonials' } },
+            sourceRef: { sourceNodeId: 'template-contact::group::1' },
+            children: [],
+          },
+          {
+            kind: 'group',
+            blockName: 'core/group',
+            attrs: { metadata: { name: 'Skills' } },
+            sourceRef: { sourceNodeId: 'template-contact::group::2' },
+            children: [],
+          },
+        ],
+      },
+    } as any;
+
+    const result = await (
+      service as unknown as {
+        generateForTemplate: (input: Record<string, unknown>) => Promise<any[]>;
+      }
+    ).generateForTemplate({
+      componentName: 'TemplateContact',
+      rawSource: '',
+      codeGeneratorModel: 'gpt-test',
+      fixAgentModel: 'gpt-test',
+      systemPrompt: 'test',
+      content: {} as never,
+      themeType: 'fse',
+      componentPlan,
+      repoManifest: {
+        themeTypeHints: { themeSlug: 'profolio-fse' },
+      } as RepoThemeManifest,
+    });
+
+    expect(codeReviewer.reviewComponent).not.toHaveBeenCalled();
+    expect(result.map((component) => component.name)).toEqual([
+      'TemplateContact',
+      'TemplateContactLetsWorkTogether',
+      'TemplateContactTestimonials',
+      'TemplateContactSkills',
+    ]);
+    expect(
+      result.find(
+        (component) => component.name === 'TemplateContactTestimonials',
+      )?.visualPlan?.sections,
+    ).toHaveLength(0);
   });
 
   it('routes profolio-fse Footer through block-faithful partial rendering', async () => {

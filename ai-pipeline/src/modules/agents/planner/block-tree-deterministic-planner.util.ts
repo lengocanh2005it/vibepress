@@ -1263,9 +1263,16 @@ function buildBlockTreeDrivenListingSections(input: {
   const postListSection = draftSections?.find(
     (section): section is PostListSection => section.type === 'post-list',
   );
+  const postTemplateCustomClassNames =
+    collectPostTemplateCustomClassNames(queryNode);
   if (postListSection) {
+    const customClassNames = mergeCustomClassNames(
+      postListSection.customClassNames,
+      postTemplateCustomClassNames,
+    );
     sections.push({
       ...postListSection,
+      ...(customClassNames.length > 0 ? { customClassNames } : {}),
       ...(queryNode?.sourceRef && !postListSection.sourceRef
         ? { sourceRef: queryNode.sourceRef }
         : {}),
@@ -1359,6 +1366,8 @@ function buildBlockTreeDrivenListingFallbackSection(
   const isProductListing =
     normalizedTemplate === 'archive-product' ||
     toVisualDataNeeds(componentPlan.dataNeeds).includes('products');
+  const postTemplateCustomClassNames =
+    collectPostTemplateCustomClassNames(queryNode);
   return {
     type: 'post-list',
     ...(isProductListing ? { resource: 'products' as const } : {}),
@@ -1374,6 +1383,9 @@ function buildBlockTreeDrivenListingFallbackSection(
     metaLayout: 'inline',
     metaAlign: 'start',
     metaSeparator: normalizedTemplate === 'search' ? 'dot' : 'dash',
+    ...(postTemplateCustomClassNames.length > 0
+      ? { customClassNames: postTemplateCustomClassNames }
+      : {}),
     ...(queryNode?.sourceRef ? { sourceRef: queryNode.sourceRef } : {}),
     debugKey: 'post-list-0',
     sectionKey: 'post-list-0',
@@ -1383,6 +1395,28 @@ function buildBlockTreeDrivenListingFallbackSection(
       minItems: isProductListing ? { products: 1 } : { posts: 1 },
     },
   };
+}
+
+function collectPostTemplateCustomClassNames(queryNode?: BlockNode): string[] {
+  if (!queryNode) return [];
+  return mergeCustomClassNames(
+    collectBlockNodesInOrder([queryNode])
+      .filter((node) => node.kind === 'post-template')
+      .flatMap((node) => node.customClassNames ?? []),
+  );
+}
+
+function mergeCustomClassNames(
+  ...classNameLists: Array<string[] | undefined>
+): string[] {
+  return [
+    ...new Set(
+      classNameLists
+        .flatMap((classNames) => classNames ?? [])
+        .map((className) => className.trim())
+        .filter(Boolean),
+    ),
+  ];
 }
 
 function buildListingLeadCoverSection(

@@ -1755,23 +1755,6 @@ const SplitView: React.FC = () => {
               )}
               {sse.isConnected && !deleteState.done && !hasTerminalWorkflowFailure && (
                 <>
-                  {canSkipVisualCompare && (
-                    <button
-                      onClick={openSkipVisualCompareConfirm}
-                      disabled={skipVisualCompareState.loading}
-                      className="text-xs font-mono px-2.5 py-1.5 rounded bg-amber-500/20 text-amber-700 hover:bg-amber-500/30 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
-                    >
-                      <span
-                        className="material-symbols-outlined text-xs"
-                        style={{ fontSize: 13 }}
-                      >
-                        skip_next
-                      </span>
-                      {skipVisualCompareState.loading
-                        ? "Skipping compare..."
-                        : "Skip compare"}
-                    </button>
-                  )}
                   <button
                     onClick={openStopConfirm}
                     disabled={deleteState.loading}
@@ -1846,9 +1829,8 @@ const SplitView: React.FC = () => {
           )}
           {skipVisualCompareState.requested && isVisualCompareRunning && (
             <div className="rounded-xl border border-sky-300 bg-sky-50 p-3 text-xs text-sky-900">
-              Skip compare has been requested. The backend will leave the
-              current metric task at the next safe checkpoint and continue to
-              the next pipeline stage.
+              Skip compare has been requested. The backend is leaving the
+              metric step and continuing to the next pipeline stage.
             </div>
           )}
           {hasTerminalWorkflowFailure && (
@@ -1890,45 +1872,90 @@ const SplitView: React.FC = () => {
             </p>
           ) : null}
 
-          {stepStatuses.map((event) => (
-            <button
-              key={event.step}
-              type="button"
-              onClick={() => setSelectedStepEvent(event)}
-              className="group flex w-full items-start gap-3 rounded-2xl border border-transparent bg-white/25 px-3 py-3 text-left transition hover:border-[#d9d1c3] hover:bg-white/55 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
-            >
-              <span
-                className={`material-symbols-outlined mt-0.5 text-lg ${getStatusColor(event.status)}`}
-                style={{ fontVariationSettings: "'FILL' 1" }}
+          {stepStatuses.map((event) => {
+            const showStepSkipButton =
+              event.step === "9_visual_compare" && canSkipVisualCompare;
+
+            return (
+              <div
+                key={event.step}
+                role="button"
+                tabIndex={0}
+                onClick={() => setSelectedStepEvent(event)}
+                onKeyDown={(keyboardEvent) => {
+                  if (
+                    keyboardEvent.target !== keyboardEvent.currentTarget ||
+                    (keyboardEvent.key !== "Enter" && keyboardEvent.key !== " ")
+                  ) {
+                    return;
+                  }
+                  keyboardEvent.preventDefault();
+                  setSelectedStepEvent(event);
+                }}
+                className="group flex w-full cursor-pointer items-start gap-3 rounded-2xl border border-transparent bg-white/25 px-3 py-3 text-left transition hover:border-[#d9d1c3] hover:bg-white/55 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
               >
-                {getStatusIcon(event.status)}
-              </span>
-              <div className="min-w-0 flex-1 space-y-1">
-                <div className="flex items-start justify-between gap-3">
-                  <p className="text-green-700 transition group-hover:text-green-800">
-                    {event.label}
-                  </p>
-                  <span className="shrink-0 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">
-                    View details
-                  </span>
-                </div>
-                {event.message && (
-                  <p className="text-black/50 text-xs">{event.message}</p>
-                )}
-                <div className="mt-2 flex items-center gap-2">
-                  <div className="h-1 flex-1 overflow-hidden rounded-full bg-white/10">
-                    <div
-                      className="h-full bg-primary transition-all duration-300"
-                      style={{ width: `${event.percent}%` }}
-                    />
+                <span
+                  className={`material-symbols-outlined mt-0.5 text-lg ${getStatusColor(event.status)}`}
+                  style={{ fontVariationSettings: "'FILL' 1" }}
+                >
+                  {getStatusIcon(event.status)}
+                </span>
+                <div className="min-w-0 flex-1 space-y-1">
+                  <div className="flex items-start justify-between gap-3">
+                    <p className="text-green-700 transition group-hover:text-green-800">
+                      {event.label}
+                    </p>
+                    <span className="shrink-0 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+                      View details
+                    </span>
                   </div>
-                  <span className="text-xs text-black/50">
-                    {event.percent}%
-                  </span>
+                  {event.message && (
+                    <p className="text-black/50 text-xs">{event.message}</p>
+                  )}
+                  <div className="mt-2 flex items-center gap-2">
+                    <div className="h-1 flex-1 overflow-hidden rounded-full bg-white/10">
+                      <div
+                        className="h-full bg-primary transition-all duration-300"
+                        style={{ width: `${event.percent}%` }}
+                      />
+                    </div>
+                    <span className="text-xs text-black/50">
+                      {event.percent}%
+                    </span>
+                  </div>
+                  {showStepSkipButton && (
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={(clickEvent) => {
+                          clickEvent.stopPropagation();
+                          openSkipVisualCompareConfirm();
+                        }}
+                        disabled={skipVisualCompareState.loading}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-[11px] font-semibold text-amber-800 transition hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <span
+                          className={`material-symbols-outlined text-[14px] ${
+                            skipVisualCompareState.loading ? "animate-spin" : ""
+                          }`}
+                        >
+                          {skipVisualCompareState.loading
+                            ? "progress_activity"
+                            : "skip_next"}
+                        </span>
+                        {skipVisualCompareState.loading
+                          ? "Skipping compare..."
+                          : "Skip compare"}
+                      </button>
+                      <span className="text-[11px] text-black/45">
+                        Continue with the current preview.
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
-            </button>
-          ))}
+            );
+          })}
 
           {previewUrl && (
             <div className="mt-8 rounded-2xl border border-[#d9d1c3] bg-[#f7f1e8] p-4 text-xs text-slate-700 shadow-lg shadow-black/10">

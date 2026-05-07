@@ -928,6 +928,7 @@ describe('block-tree canonical profolio pages', () => {
             {
               kind: 'post-template',
               blockName: 'post-template',
+              customClassNames: ['products-block-post-template'],
               children: [
                 { kind: 'post-title', blockName: 'post-title' },
                 { kind: 'post-excerpt', blockName: 'post-excerpt' },
@@ -945,6 +946,50 @@ describe('block-tree canonical profolio pages', () => {
       expect.objectContaining({
         type: 'post-list',
         title: 'Latest Posts',
+        customClassNames: ['products-block-post-template'],
+      }),
+    ]);
+  });
+
+  it('carries post-template custom classes into fallback post-list sections', () => {
+    const plan = buildBlockTreeDrivenVisualPlanForComponent({
+      ...profolioBaseInput,
+      componentPlan: {
+        templateName: 'archive-product',
+        componentName: 'ArchiveProduct',
+        type: 'page' as const,
+        route: '/shop',
+        dataNeeds: ['products'],
+        isDetail: false,
+      },
+      draftSections: [],
+      draftBlockTree: [
+        {
+          kind: 'query',
+          blockName: 'query',
+          children: [
+            {
+              kind: 'post-template',
+              blockName: 'post-template',
+              customClassNames: [
+                'products-block-post-template',
+                ' products-block-post-template ',
+              ],
+              children: [
+                { kind: 'product-image', blockName: 'woocommerce/product-image' },
+                { kind: 'product-price', blockName: 'woocommerce/product-price' },
+              ],
+            },
+          ],
+        },
+      ] as BlockNode[],
+    });
+
+    expect(plan?.sections).toEqual([
+      expect.objectContaining({
+        type: 'post-list',
+        resource: 'products',
+        customClassNames: ['products-block-post-template'],
       }),
     ]);
   });

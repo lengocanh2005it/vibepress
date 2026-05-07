@@ -49,7 +49,10 @@ import {
   resolvePlannerSectionBlueprint,
 } from '../agents/planner/planner-surface-plan.util.js';
 import { GeneratedCodeReviewService } from '../agents/react-generator/generated-code-review.service.js';
-import type { ReactGenerateResult } from '../agents/react-generator/react-generator.service.js';
+import type {
+  GeneratedComponent,
+  ReactGenerateResult,
+} from '../agents/react-generator/react-generator.service.js';
 import { ReactGeneratorService } from '../agents/react-generator/react-generator.service.js';
 import { SectionEditService } from '../agents/react-generator/section-edit.service.js';
 import { ReactVisualEditContractService } from '../agents/react-generator/react-visual-edit-contract.service.js';
@@ -840,6 +843,7 @@ export class OrchestratorService implements BeforeApplicationShutdown {
         message: requestMessage,
         data: this.getStepEventData(body.jobId, '9_visual_compare'),
       });
+      control.visualCompareSkipResolver?.(requestMessage);
     }
 
     return {
@@ -1757,6 +1761,7 @@ export default function ${component.name}() {
         normalizedTheme,
         content,
         repoResult.themeManifest,
+        { logScope: false },
       );
       const reviewResult = await this.runStep(
         state,
@@ -2257,6 +2262,24 @@ export default function ${component.name}() {
             result.components,
           );
           let components = validation.components;
+          await this.reactGenerator.persistDraftComponents(jobId, components);
+          const validateCandidateInComponentSet = (
+            candidate: GeneratedComponent,
+            componentIndex: number,
+          ) => {
+            const candidateSet = components.map((component, index) =>
+              index === componentIndex ? candidate : component,
+            );
+            const candidateValidation =
+              this.validator.collectValidationIssues(candidateSet);
+            return {
+              validation: candidateValidation,
+              component: candidateValidation.components[componentIndex],
+              failure: candidateValidation.failures.find(
+                (item) => item.component.name === candidate.name,
+              ),
+            };
+          };
 
           for (
             let attempt = 1;
@@ -2295,8 +2318,8 @@ export default function ${component.name}() {
                     );
                   if (sanitized.code !== targetComponent.code) {
                     const sanitizedValidation =
-                      this.validator.collectValidationIssues([sanitized]);
-                    if (sanitizedValidation.failures.length === 0) {
+                      validateCandidateInComponentSet(sanitized, compIndex);
+                    if (!sanitizedValidation.failure) {
                       this.logger.log(
                         `[Stage 4: D4 Validator] Deterministically sanitized "${failure.component.name}" before AI fix.`,
                       );
@@ -2306,10 +2329,10 @@ export default function ${component.name}() {
                       );
                       return {
                         compIndex,
-                        component: sanitizedValidation.components[0],
+                        component: sanitizedValidation.component,
                       };
                     }
-                    targetComponent = sanitizedValidation.components[0];
+                    targetComponent = sanitizedValidation.component;
                   }
                 }
                 const isProtectedDeterministicSyntaxRepair =
@@ -2328,11 +2351,12 @@ export default function ${component.name}() {
                     ? 'syntax-only'
                     : 'full',
                 });
-                const revalidated = this.validator.collectValidationIssues([
+                const revalidated = validateCandidateInComponentSet(
                   fixed,
-                ]);
-                if (revalidated.failures.length > 0) {
-                  const retryError = revalidated.failures[0]?.error;
+                  compIndex,
+                );
+                if (revalidated.failure) {
+                  const retryError = revalidated.failure.error;
                   if (
                     retryError &&
                     this.shouldRetryWithFullComponentRegeneration(retryError)
@@ -2365,8 +2389,8 @@ export default function ${component.name}() {
                       fixMode: 'full',
                     });
                     const regeneratedValidation =
-                      this.validator.collectValidationIssues([regenerated]);
-                    if (regeneratedValidation.failures.length === 0) {
+                      validateCandidateInComponentSet(regenerated, compIndex);
+                    if (!regeneratedValidation.failure) {
                       this.recordFullComponentRegenerationSummary(
                         summaryDraft,
                         {
@@ -2379,11 +2403,11 @@ export default function ${component.name}() {
                       );
                       return {
                         compIndex,
-                        component: regeneratedValidation.components[0],
+                        component: regeneratedValidation.component,
                       };
                     }
                     const regeneratedError =
-                      regeneratedValidation.failures[0]?.error;
+                      regeneratedValidation.failure?.error;
                     this.recordFullComponentRegenerationSummary(summaryDraft, {
                       stage: 'stage4-validator-fix',
                       componentName: failure.component.name,
@@ -2416,7 +2440,7 @@ export default function ${component.name}() {
 
                 return {
                   compIndex,
-                  component: revalidated.components[0],
+                  component: revalidated.component,
                 };
               }),
             );
@@ -2428,6 +2452,7 @@ export default function ${component.name}() {
 
             validation = this.validator.collectValidationIssues(components);
             components = validation.components;
+            await this.reactGenerator.persistDraftComponents(jobId, components);
           }
 
           const toleratedValidationFailures = validation.failures.filter(
@@ -2474,6 +2499,8 @@ export default function ${component.name}() {
             });
             components = fallbackRecovery.components;
             validation = this.validator.collectValidationIssues(components);
+            components = validation.components;
+            await this.reactGenerator.persistDraftComponents(jobId, components);
             const remainingFatalValidationFailures = validation.failures.filter(
               (failure) =>
                 !this.shouldTolerateProtectedDeterministicSharedPartialFailure(
@@ -2498,11 +2525,25 @@ export default function ${component.name}() {
           // generated entirely by CodeGeneratorService — no LLM TSX gen involved.
           // Protected shared partials are syntax-checked and syntax-fixed in Stage 4.
           // Focused edit-request refinements run later, after the baseline preview is live.
+          const aiComponentNames = new Set(
+            components
+              .filter((c) => c.generationMode !== 'deterministic')
+              .map((c) => c.name),
+          );
           const aiComponents = components.filter(
-            (c) => c.generationMode !== 'deterministic',
+            (c) =>
+              c.generationMode !== 'deterministic' ||
+              this.componentImportsAny(c, aiComponentNames),
+          );
+          const aiReviewComponentNames = new Set(
+            aiComponents.map((component) => component.name),
           );
           const deterministicNames = components
-            .filter((c) => c.generationMode === 'deterministic')
+            .filter(
+              (c) =>
+                c.generationMode === 'deterministic' &&
+                !aiReviewComponentNames.has(c.name),
+            )
             .map((c) => c.name);
           if (deterministicNames.length > 0) {
             this.logger.log(
@@ -2554,6 +2595,39 @@ export default function ${component.name}() {
                   (c) => c.name === failure.componentName,
                 );
                 if (compIndex === -1) return null;
+                const validateAiCandidateInFullSet = (
+                  candidate: GeneratedComponent,
+                ) => {
+                  const fullIndex = components.findIndex(
+                    (component) => component.name === candidate.name,
+                  );
+                  const baseSet = components.map((component) => {
+                    const currentAiVersion = aiComponents.find(
+                      (item) => item.name === component.name,
+                    );
+                    return currentAiVersion ?? component;
+                  });
+                  const candidateSet =
+                    fullIndex >= 0
+                      ? baseSet.map((component) =>
+                          component.name === candidate.name
+                            ? candidate
+                            : component,
+                        )
+                      : [...baseSet, candidate];
+                  const candidateValidation =
+                    this.validator.collectValidationIssues(candidateSet);
+                  return {
+                    validation: candidateValidation,
+                    component:
+                      candidateValidation.components.find(
+                        (item) => item.name === candidate.name,
+                      ) ?? candidate,
+                    failure: candidateValidation.failures.find(
+                      (item) => item.component.name === candidate.name,
+                    ),
+                  };
+                };
                 const fixed = await this.reactGenerator.fixComponent({
                   component: aiComponents[compIndex],
                   plan: reviewResult.plan,
@@ -2561,11 +2635,9 @@ export default function ${component.name}() {
                   modelConfig: { fixAgent: resolvedModels.fixAgent },
                   logPath,
                 });
-                const revalidated = this.validator.collectValidationIssues([
-                  fixed,
-                ]);
-                if (revalidated.failures.length > 0) {
-                  const validationErr = revalidated.failures[0]?.error;
+                const revalidated = validateAiCandidateInFullSet(fixed);
+                if (revalidated.failure) {
+                  const validationErr = revalidated.failure.error;
                   if (
                     validationErr &&
                     this.shouldRetryWithFullComponentRegeneration(validationErr)
@@ -2598,8 +2670,8 @@ export default function ${component.name}() {
                       fixMode: 'full',
                     });
                     const regeneratedValidation =
-                      this.validator.collectValidationIssues([regenerated]);
-                    if (regeneratedValidation.failures.length === 0) {
+                      validateAiCandidateInFullSet(regenerated);
+                    if (!regeneratedValidation.failure) {
                       this.recordFullComponentRegenerationSummary(
                         summaryDraft,
                         {
@@ -2612,11 +2684,11 @@ export default function ${component.name}() {
                       );
                       return {
                         compIndex,
-                        component: regeneratedValidation.components[0],
+                        component: regeneratedValidation.component,
                       };
                     }
                     const regeneratedErr =
-                      regeneratedValidation.failures[0]?.error;
+                      regeneratedValidation.failure?.error;
                     this.recordFullComponentRegenerationSummary(summaryDraft, {
                       stage: 'stage5-review-fix',
                       componentName: failure.componentName,
@@ -2646,12 +2718,19 @@ export default function ${component.name}() {
                   );
                   return null;
                 }
-                return { compIndex, component: revalidated.components[0] };
+                return { compIndex, component: revalidated.component };
               }),
             );
             for (const r of fixResults) {
               if (r) aiComponents[r.compIndex] = r.component;
             }
+            await this.reactGenerator.persistDraftComponents(jobId, [
+              ...components.filter(
+                (component) =>
+                  !aiComponents.some((ai) => ai.name === component.name),
+              ),
+              ...aiComponents,
+            ]);
           }
 
           for (const fixed of aiComponents) {
@@ -2706,6 +2785,7 @@ export default function ${component.name}() {
           } else {
             components = postReviewValidation.components;
           }
+          await this.reactGenerator.persistDraftComponents(jobId, components);
           lastKnownSafeComponents = this.snapshotComponentsByName(components);
 
           this.emitStepProgress(
@@ -3121,6 +3201,38 @@ export default function ${component.name}() {
           }
           return nextMetrics;
         };
+        const waitForVisualCompareSkipRequest = (): Promise<void> =>
+          new Promise((resolve) => {
+            const compareControl = this.controls.get(jobId);
+            if (!compareControl) return;
+            if (compareControl.skipVisualCompareRequested) {
+              resolve();
+              return;
+            }
+            compareControl.visualCompareSkipResolver = () => resolve();
+          });
+        const runSkippableCompareRound = async (
+          label: string,
+        ): Promise<SiteCompareMetrics | null> => {
+          const comparePromise = runCompareRound(label);
+          const skipPromise = waitForVisualCompareSkipRequest().then(
+            async () => {
+              await skipVisualCompareIfRequested(
+              'Visual compare was skipped while metric collection was still running.',
+              );
+              return null;
+            },
+          );
+
+          try {
+            return await Promise.race([comparePromise, skipPromise]);
+          } finally {
+            const compareControl = this.controls.get(jobId);
+            if (compareControl) {
+              compareControl.visualCompareSkipResolver = undefined;
+            }
+          }
+        };
 
         this.emitStepProgress(
           state,
@@ -3133,8 +3245,11 @@ export default function ${component.name}() {
         );
 
         try {
-          metrics = await runCompareRound('initial');
+          metrics = await runSkippableCompareRound('initial');
         } catch (err: any) {
+          if (err instanceof PipelineStepSkipError) {
+            throw err;
+          }
           this.logger.error(
             `[site-compare] failed — ${err?.message ?? err}`,
             err?.response?.data ?? err?.stack,
@@ -3211,7 +3326,9 @@ export default function ${component.name}() {
             }
 
             try {
-              const roundMetrics = await runCompareRound(`round-${round}`);
+              const roundMetrics = await runSkippableCompareRound(
+                `round-${round}`,
+              );
               await skipVisualCompareIfRequested(
                 `Visual compare was skipped after re-checking preview metrics for round ${round}.`,
               );
@@ -3266,6 +3383,9 @@ export default function ${component.name}() {
                 break;
               }
             } catch (err: any) {
+              if (err instanceof PipelineStepSkipError) {
+                throw err;
+              }
               this.logger.error(
                 `[site-compare] re-run after visual repair failed — ${err?.message ?? err}`,
                 err?.response?.data ?? err?.stack,
@@ -7939,6 +8059,38 @@ export default function ${component.name}() {
     return { ...component, code };
   }
 
+  private componentImportsAny(
+    component: { code: string },
+    componentNames: Set<string>,
+  ): boolean {
+    if (componentNames.size === 0) return false;
+    const matches = [
+      ...component.code.matchAll(
+        /import\s+([A-Z][A-Za-z0-9]*)\s+from\s+['"]([^'"]+)['"]/g,
+      ),
+    ];
+    for (const match of matches) {
+      const localName = match[1];
+      const importPath = match[2];
+      if (!importPath.startsWith('./') && !importPath.startsWith('../')) {
+        continue;
+      }
+      const basename = importPath
+        .replace(/^\.\/|^\.\.\//, '')
+        .split('/')
+        .pop()
+        ?.replace(/\.(?:js|jsx|ts|tsx)$/, '');
+      if (
+        basename &&
+        basename === localName &&
+        componentNames.has(localName)
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private shouldTolerateProtectedDeterministicSharedPartialFailure(
     component: { name: string; generationMode?: 'deterministic' | 'ai' },
     error: string,
@@ -7968,6 +8120,7 @@ export default function ${component.name}() {
     return (
       normalized.includes('visual plan obligations violated') ||
       normalized.includes('visual plan fidelity violated') ||
+      normalized.includes('surface-plan source evidence violated') ||
       normalized.includes('sectionaudit:') ||
       normalized.includes('required capability') ||
       normalized.includes('obligation "') ||

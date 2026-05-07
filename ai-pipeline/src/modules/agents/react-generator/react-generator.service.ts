@@ -34,6 +34,7 @@ import type {
 import type {
   BlockNode,
   ComponentVisualPlan,
+  DataNeed,
   SectionPlan,
 } from './visual-plan.schema.js';
 import { shouldBypassAiGenerationForVisualPlan } from './visual-plan.schema.js';
@@ -43,6 +44,7 @@ import {
   type ComponentRenderContract,
 } from '../planner/render-contract.schema.js';
 import type { PlannerSurfacePlan } from '../planner/planner-surface-plan.schema.js';
+import { summarizeSharedLayoutSubtree } from '../planner/shared-layout-subtree.util.js';
 import { shouldPreferThemeSourceFaithfulDeterministicPage } from './source-faithful-deterministic.util.js';
 import {
   shouldForceStrictThemeSourceFaithfulDeterministicPage,
@@ -67,6 +69,7 @@ type SourceClusterComponent = {
   label: string;
   node: BlockNode;
   sections: SectionPlan[];
+  dataNeeds: DataNeed[];
 };
 
 /**
@@ -78,11 +81,60 @@ function isSharedLayoutBlock(node: WpNode): boolean {
   if (/^(header|footer|core\/header|core\/footer)$/i.test(node.block))
     return true;
   if (
-    node.block === 'template-part' &&
+    /^(?:core\/)?template-part$/i.test(node.block) &&
     /^(header|footer)/i.test(String(node.params?.slug ?? ''))
   )
     return true;
   return false;
+}
+
+function isSharedLayoutSubtree(node: WpNode): boolean {
+  if (isSharedLayoutBlock(node)) return true;
+
+  const summary = summarizeSharedLayoutSubtree(node);
+  if (summary.hasRouteOwnedContent) return false;
+
+  if (
+    summary.hasFooterClass &&
+    (summary.hasCopyrightCopy ||
+      summary.socialLinkCount > 0 ||
+      summary.linkLikeCount > 0 ||
+      summary.headingCount > 0)
+  ) {
+    return true;
+  }
+
+  if (
+    summary.hasCopyrightCopy &&
+    (summary.socialLinkCount > 0 ||
+      summary.linkLikeCount > 0 ||
+      summary.headingCount > 0)
+  ) {
+    return true;
+  }
+
+  const hasIdentity =
+    summary.kinds.has('site-logo') ||
+    summary.kinds.has('site-title') ||
+    summary.kinds.has('site-tagline');
+  const hasNavigation =
+    summary.kinds.has('navigation') || summary.kinds.has('navigation-link');
+
+  return hasIdentity && (hasNavigation || summary.headingCount > 0);
+}
+
+function filterSharedLayoutNodes(nodes: WpNode[]): WpNode[] {
+  const visit = (node: WpNode): WpNode | null => {
+    if (isSharedLayoutSubtree(node)) return null;
+    const children = (node.children ?? [])
+      .map((child) => visit(child))
+      .filter((child): child is WpNode => child !== null);
+    if (children.length === (node.children?.length ?? 0)) return node;
+    const { children: _children, ...rest } = node;
+    return children.length > 0 ? { ...rest, children } : rest;
+  };
+
+  return nodes.map((node) => visit(node)).filter((node): node is WpNode => !!node);
 }
 
 export interface GeneratedComponent {
@@ -434,7 +486,7 @@ export class ReactGeneratorService {
       /^(header|footer)/i.test(componentName);
     const filteredNodes =
       templateNodes && !isHeaderOrFooterPartial
-        ? templateNodes.filter((node) => !isSharedLayoutBlock(node))
+        ? filterSharedLayoutNodes(templateNodes)
         : templateNodes;
     const requiredCustomClassNames = this.collectCustomClassNamesFromNodes(
       filteredNodes ?? [],
@@ -705,12 +757,15 @@ export class ReactGeneratorService {
     const themeSlug = repoManifest?.themeTypeHints?.themeSlug?.trim();
     if (themeSlug !== 'profolio-fse') return false;
 
-    const templateName = componentPlan.templateName?.toLowerCase() ?? '';
-    if (templateName !== 'front-page' && !/^frontpage$/i.test(componentName)) {
+    if (componentPlan.isDetail) {
       return false;
     }
 
-    return (componentPlan.visualPlan.blockTree?.length ?? 0) > 0;
+    return (
+      (componentPlan.visualPlan.blockTree?.length ?? 0) > 0 &&
+      (componentPlan.visualPlan.sections.length >= 1 ||
+        (componentPlan.visualPlan.blockTree?.length ?? 0) >= 2)
+    );
   }
 
   private async generateProfolioSourceClusterChildComposition(input: {
@@ -745,7 +800,11 @@ export class ReactGeneratorService {
     const visualPlan = componentPlan.visualPlan;
     if (!visualPlan?.blockTree?.length) return null;
 
-    const clusters = this.buildProfolioFrontPageSourceClusters(visualPlan);
+    const clusters = this.buildProfolioSourceClusters(
+      visualPlan,
+      componentName,
+      componentPlan.templateName,
+    );
     if (clusters.length < 2) return null;
 
     this.logger.log(
@@ -793,6 +852,7 @@ export class ReactGeneratorService {
     const parentCode = this.buildChildComponentAssemblyCode(
       componentName,
       children,
+      clusters,
     );
     const parent = this.attachPlanContext(
       { name: componentName, filePath: '', code: parentCode },
@@ -805,6 +865,20 @@ export class ReactGeneratorService {
     );
 
     return [parent, ...children];
+  }
+
+  private buildProfolioSourceClusters(
+    visualPlan: ComponentVisualPlan,
+    componentName: string,
+    templateName?: string,
+  ): SourceClusterComponent[] {
+    if (
+      /^frontpage$/i.test(componentName) ||
+      templateName?.toLowerCase() === 'front-page'
+    ) {
+      return this.buildProfolioFrontPageSourceClusters(visualPlan);
+    }
+    return this.buildGenericProfolioSourceClusters(visualPlan, componentName);
   }
 
   private buildProfolioFrontPageSourceClusters(
@@ -826,6 +900,7 @@ export class ReactGeneratorService {
           visualPlan.sections,
           node.sourceRef?.sourceNodeId,
         ),
+        dataNeeds: [],
       });
     };
 
@@ -852,7 +927,114 @@ export class ReactGeneratorService {
       );
     }
 
-    return result;
+    return result.map((cluster) => ({
+      ...cluster,
+      dataNeeds: this.inferDataNeedsForSourceCluster(cluster.sections),
+    }));
+  }
+
+  private buildGenericProfolioSourceClusters(
+    visualPlan: ComponentVisualPlan,
+    componentName: string,
+  ): SourceClusterComponent[] {
+    const nodes = visualPlan.blockTree ?? [];
+    if (nodes.length === 0) return [];
+
+    const clusters: SourceClusterComponent[] = [];
+    const byKey = new Map<string, SourceClusterComponent>();
+
+    for (const [index, section] of visualPlan.sections.entries()) {
+      const sourceId = this.getSectionClusterSourceNodeId(section);
+      const node =
+        this.findSemanticClusterNodeForSection(nodes, section) ??
+        (sourceId && this.findBestClusterNodeForSourceId(nodes, sourceId));
+      if (!node) continue;
+
+      const key =
+        node.sourceRef?.sourceNodeId ??
+        sourceId ??
+        `${componentName.toLowerCase()}::section::${index}`;
+      const existing = byKey.get(key);
+      if (existing) {
+        existing.sections.push(section);
+        continue;
+      }
+
+      const label = this.buildGenericClusterLabel(section, node, index);
+      const cluster: SourceClusterComponent = {
+        name: `${componentName}${this.toPascalIdentifier(label)}`,
+        label,
+        node,
+        sections: [section],
+        dataNeeds: [],
+      };
+      byKey.set(key, cluster);
+      clusters.push(cluster);
+    }
+
+    for (const [index, node] of nodes.entries()) {
+      const nodePath = this.sourceNodePath(node.sourceRef?.sourceNodeId ?? '');
+      if (!nodePath) continue;
+      const alreadyCovered = clusters.some((cluster) => {
+        const clusterPath = this.sourceNodePath(
+          cluster.node.sourceRef?.sourceNodeId ?? '',
+        );
+        return (
+          clusterPath &&
+          this.isSourcePathWithinCluster(clusterPath, nodePath)
+        );
+      });
+      if (alreadyCovered) continue;
+
+      const label = this.readBlockMetadataName(node) || `Block-${index + 1}`;
+      clusters.push({
+        name: `${componentName}${this.toPascalIdentifier(label)}`,
+        label,
+        node,
+        sections: [],
+        dataNeeds: [],
+      });
+    }
+
+    return clusters.map((cluster) => ({
+      ...cluster,
+      dataNeeds: this.inferDataNeedsForSourceCluster(cluster.sections),
+    }));
+  }
+
+  private getSectionClusterSourceNodeId(section: SectionPlan): string | undefined {
+    const loose = section as SectionPlan & {
+      sourceRef?: {
+        sourceNodeId?: string;
+        parentSourceNodeId?: string;
+      };
+    };
+    return (
+      loose.sourceRef?.sourceNodeId?.trim() ||
+      loose.sourceRef?.parentSourceNodeId?.trim() ||
+      section.obligation?.sourceEvidence?.sourceNodeIds?.[0]?.trim()
+    );
+  }
+
+  private buildGenericClusterLabel(
+    section: SectionPlan,
+    node: BlockNode,
+    index: number,
+  ): string {
+    const loose = section as SectionPlan & {
+      debugKey?: string;
+      title?: string;
+      heading?: string;
+      subtitle?: string;
+    };
+    return (
+      this.readBlockMetadataName(node) ||
+      loose.debugKey ||
+      loose.title ||
+      loose.heading ||
+      loose.subtitle ||
+      `${section.type}-${index + 1}`
+    );
   }
 
   private buildSourceClusterChildPlan(input: {
@@ -867,7 +1049,7 @@ export class ReactGeneratorService {
       renderMode: parentVisualPlan.renderMode ?? 'hybrid',
       sections: cluster.sections,
       blockTree: [cluster.node],
-      dataNeeds: [],
+      dataNeeds: cluster.dataNeeds,
     };
 
     return {
@@ -876,7 +1058,7 @@ export class ReactGeneratorService {
       templateName: `${parentPlan.templateName}::${cluster.label}`,
       type: 'partial',
       route: null,
-      dataNeeds: [],
+      dataNeeds: cluster.dataNeeds,
       isDetail: false,
       description: `Source-bound ${cluster.label} child component for ${parentPlan.componentName}`,
       surfacePlan: undefined,
@@ -888,24 +1070,323 @@ export class ReactGeneratorService {
   private buildChildComponentAssemblyCode(
     componentName: string,
     children: GeneratedComponent[],
+    clusters: SourceClusterComponent[],
   ): string {
+    const needs = this.mergeDataNeeds(
+      clusters.flatMap((cluster) => cluster.dataNeeds),
+    );
+    const needsRuntimeData = needs.length > 0;
     const imports = children
       .map((child) => `import ${child.name} from '../components/${child.name}';`)
       .join('\n');
+    const clusterByName = new Map(
+      clusters.map((cluster) => [cluster.name, cluster]),
+    );
     const renders = children
-      .map((child) => `      <${child.name} />`)
+      .map((child) => {
+        const props = this.buildChildPropsExpression(
+          clusterByName.get(child.name)?.dataNeeds ?? [],
+        );
+        return `      <${child.name}${props} />`;
+      })
       .join('\n');
+    const runtime = needsRuntimeData
+      ? `${this.buildSourceClusterParentTypes(needs)}
 
-    return `import React from 'react';
+${this.buildSourceClusterParentState(needs)}
+`
+      : '';
+
+    return `import React${needsRuntimeData ? ', { useEffect, useState }' : ''} from 'react';
 ${imports}
 
 export default function ${componentName}() {
-  return (
+${runtime}  return (
     <main className="wp-site-blocks">
 ${renders}
     </main>
   );
 }
+`;
+  }
+
+  private inferDataNeedsForSourceCluster(sections: SectionPlan[]): DataNeed[] {
+    const needs = new Set<DataNeed>();
+    const add = (need: DataNeed) => needs.add(need);
+
+    for (const section of sections) {
+      const loose = section as SectionPlan & {
+        resource?: string;
+        dataNeeds?: string[];
+      };
+      for (const need of loose.dataNeeds ?? []) {
+        this.addKnownDataNeed(needs, need);
+      }
+
+      switch (section.type) {
+        case 'post-list':
+          add(loose.resource === 'products' ? 'products' : 'posts');
+          break;
+        case 'post-content':
+        case 'post-title':
+        case 'post-meta':
+        case 'post-featured-image':
+        case 'post-terms':
+          add('postDetail');
+          break;
+        case 'post-navigation':
+          add('postDetail');
+          add('posts');
+          break;
+        case 'page-content':
+          add('pageDetail');
+          break;
+        case 'comments':
+          add('comments');
+          break;
+        case 'navbar':
+          add('menus');
+          add('siteInfo');
+          break;
+        case 'footer':
+          add('footerLinks');
+          add('siteInfo');
+          break;
+      }
+
+      for (const capability of section.obligation?.required ?? []) {
+        switch (capability) {
+          case 'posts':
+            add('posts');
+            break;
+          case 'products':
+            add('products');
+            break;
+          case 'pages':
+            add('pages');
+            break;
+          case 'menus':
+            add('menus');
+            break;
+          case 'site-info':
+            add('siteInfo');
+            break;
+          case 'comments-list':
+          case 'comment-form':
+            add('comments');
+            break;
+          case 'post-content':
+            add('postDetail');
+            break;
+          case 'page-content':
+            add('pageDetail');
+            break;
+        }
+      }
+    }
+
+    return this.mergeDataNeeds([...needs]);
+  }
+
+  private addKnownDataNeed(target: Set<DataNeed>, need: string): void {
+    const normalized = need.trim();
+    const aliases: Record<string, DataNeed> = {
+      'post-detail': 'postDetail',
+      'product-detail': 'productDetail',
+      'page-detail': 'pageDetail',
+      'site-info': 'siteInfo',
+      'footer-links': 'footerLinks',
+    };
+    const value = aliases[normalized] ?? normalized;
+    if (
+      [
+        'siteInfo',
+        'footerLinks',
+        'posts',
+        'products',
+        'pages',
+        'menus',
+        'postDetail',
+        'productDetail',
+        'pageDetail',
+        'comments',
+      ].includes(value)
+    ) {
+      target.add(value as DataNeed);
+    }
+  }
+
+  private mergeDataNeeds(needs: DataNeed[]): DataNeed[] {
+    const order: DataNeed[] = [
+      'siteInfo',
+      'footerLinks',
+      'posts',
+      'products',
+      'pages',
+      'menus',
+      'postDetail',
+      'productDetail',
+      'pageDetail',
+      'comments',
+    ];
+    const set = new Set(needs);
+    return order.filter((need) => set.has(need));
+  }
+
+  private buildChildPropsExpression(dataNeeds: DataNeed[]): string {
+    const props = this.dataNeedsToPropNames(dataNeeds);
+    if (props.length === 0) return '';
+    return ` ${[
+      ...props.map((prop) => `${prop}={${prop}}`),
+      'loading={loading}',
+      'error={error}',
+    ].join(' ')}`;
+  }
+
+  private dataNeedsToPropNames(dataNeeds: DataNeed[]): string[] {
+    const props: string[] = [];
+    const add = (name: string) => {
+      if (!props.includes(name)) props.push(name);
+    };
+    for (const need of dataNeeds) {
+      switch (need) {
+        case 'posts':
+          add('posts');
+          break;
+        case 'products':
+          add('products');
+          break;
+        case 'pages':
+          add('pages');
+          break;
+        case 'menus':
+          add('menus');
+          break;
+        case 'siteInfo':
+          add('siteInfo');
+          break;
+        case 'footerLinks':
+          add('footerColumns');
+          break;
+      }
+    }
+    return props;
+  }
+
+  private buildSourceClusterParentTypes(dataNeeds: DataNeed[]): string {
+    const lines: string[] = [];
+    if (dataNeeds.includes('posts')) {
+      lines.push(
+        'type Post = { id?: number | string; title?: string; slug?: string; excerpt?: string; content?: string; featuredImage?: string; date?: string; author?: string; authorSlug?: string; categories?: string[]; categorySlugs?: string[]; tags?: string[]; };',
+      );
+    }
+    if (dataNeeds.includes('products')) {
+      lines.push(
+        'type Product = { id?: number | string; title?: string; slug?: string; excerpt?: string; content?: string; featuredImage?: string; price?: string; buttonText?: string; buttonUrl?: string; categories?: string[]; tags?: string[]; };',
+      );
+    }
+    if (dataNeeds.includes('pages')) {
+      lines.push(
+        'type Page = { id?: number | string; title?: string; slug?: string; excerpt?: string; content?: string; featuredImage?: string; };',
+      );
+    }
+    if (dataNeeds.includes('menus')) {
+      lines.push(
+        'type MenuItem = { id?: number | string; label?: string; title?: string; url?: string; path?: string; target?: string; children?: MenuItem[]; };',
+      );
+    }
+    if (dataNeeds.includes('siteInfo')) {
+      lines.push(
+        'type SiteInfo = { siteName?: string; blogDescription?: string; logoUrl?: string; siteUrl?: string; };',
+      );
+    }
+    if (dataNeeds.includes('footerLinks')) {
+      lines.push(
+        'type FooterColumn = { heading?: string; title?: string; links?: Array<{ label?: string; title?: string; url?: string; path?: string; target?: string; }>; };',
+      );
+    }
+    return lines.join('\n');
+  }
+
+  private buildSourceClusterParentState(dataNeeds: DataNeed[]): string {
+    const stateLines: string[] = [];
+    const fetches: string[] = [];
+    const assignments: string[] = [];
+    let index = 0;
+    const addFetch = (endpoint: string, assignment: string) => {
+      fetches.push(`        fetch('${endpoint}')`);
+      assignments.push(assignment.replaceAll('__RES__', `res${index}`));
+      index += 1;
+    };
+
+    if (dataNeeds.includes('posts')) {
+      stateLines.push('  const [posts, setPosts] = useState<Post[]>([]);');
+      addFetch(
+        '/api/posts',
+        '      const postsData = await __RES__.json(); setPosts(Array.isArray(postsData) ? postsData : []);',
+      );
+    }
+    if (dataNeeds.includes('products')) {
+      stateLines.push('  const [products, setProducts] = useState<Product[]>([]);');
+      addFetch(
+        '/api/post-types/product/posts',
+        '      const productsData = await __RES__.json(); setProducts(Array.isArray(productsData) ? productsData : []);',
+      );
+    }
+    if (dataNeeds.includes('pages')) {
+      stateLines.push('  const [pages, setPages] = useState<Page[]>([]);');
+      addFetch(
+        '/api/pages',
+        '      const pagesData = await __RES__.json(); setPages(Array.isArray(pagesData) ? pagesData : []);',
+      );
+    }
+    if (dataNeeds.includes('menus')) {
+      stateLines.push('  const [menus, setMenus] = useState<MenuItem[]>([]);');
+      addFetch(
+        '/api/menus',
+        '      const menusData = await __RES__.json(); setMenus(Array.isArray(menusData) ? menusData : []);',
+      );
+    }
+    if (dataNeeds.includes('siteInfo')) {
+      stateLines.push('  const [siteInfo, setSiteInfo] = useState<SiteInfo | null>(null);');
+      addFetch(
+        '/api/site-info',
+        '      const siteInfoData = await __RES__.json(); setSiteInfo(siteInfoData && typeof siteInfoData === "object" ? siteInfoData : null);',
+      );
+    }
+    if (dataNeeds.includes('footerLinks')) {
+      stateLines.push('  const [footerColumns, setFooterColumns] = useState<FooterColumn[]>([]);');
+      addFetch(
+        '/api/footer-links',
+        '      const footerLinksData = await __RES__.json(); setFooterColumns(Array.isArray(footerLinksData) ? footerLinksData : []);',
+      );
+    }
+    stateLines.push('  const [loading, setLoading] = useState(true);');
+    stateLines.push('  const [error, setError] = useState<string | null>(null);');
+
+    const responseVars = fetches.map((_, i) => `res${i}`).join(', ');
+    return `${stateLines.join('\n')}
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadData = async () => {
+      try {
+        const [${responseVars}] = await Promise.all([
+${fetches.join(',\n')}
+        ]);
+        if (cancelled) return;
+${assignments.join('\n')}
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load page data');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    loadData();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 `;
   }
 
@@ -957,6 +1438,65 @@ ${renders}
     return undefined;
   }
 
+  private findSemanticClusterNodeForSection(
+    nodes: BlockNode[],
+    section: SectionPlan,
+  ): BlockNode | undefined {
+    if (section.type === 'accordion') {
+      return (
+        this.findFirstBlockNode(
+          nodes,
+          (node) =>
+            this.normalizeClusterLabel(this.readBlockMetadataName(node)) ===
+              'faq' ||
+            this.nodeContainsBlockKind(node, /^(?:core\/)?details$|details/i),
+        ) ?? undefined
+      );
+    }
+    return undefined;
+  }
+
+  private nodeContainsBlockKind(
+    node: BlockNode,
+    pattern: RegExp,
+  ): boolean {
+    if (pattern.test(node.blockName ?? '') || pattern.test(node.kind ?? '')) {
+      return true;
+    }
+    return (node.children ?? []).some((child) =>
+      this.nodeContainsBlockKind(child, pattern),
+    );
+  }
+
+  private findBestClusterNodeForSourceId(
+    nodes: BlockNode[],
+    sourceNodeId: string,
+  ): BlockNode | undefined {
+    const sourcePath = this.sourceNodePath(sourceNodeId);
+    if (!sourcePath) return undefined;
+
+    let best: BlockNode | undefined;
+    let bestDepth = -1;
+
+    const visit = (items: BlockNode[], depth = 0) => {
+      for (const node of items) {
+        const nodePath = this.sourceNodePath(node.sourceRef?.sourceNodeId ?? '');
+        if (
+          nodePath &&
+          this.isSourcePathWithinCluster(sourcePath, nodePath) &&
+          depth > bestDepth
+        ) {
+          best = node;
+          bestDepth = depth;
+        }
+        if (node.children?.length) visit(node.children, depth + 1);
+      }
+    };
+
+    visit(nodes);
+    return best;
+  }
+
   private readBlockMetadataName(node: BlockNode): string | undefined {
     const metadata = node.attrs?.metadata;
     if (metadata && typeof metadata === 'object') {
@@ -973,6 +1513,7 @@ ${renders}
   private toPascalIdentifier(value: string): string {
     const normalized = value
       .trim()
+      .replace(/['’]/g, '')
       .split(/[^A-Za-z0-9]+/)
       .filter(Boolean)
       .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
@@ -1001,8 +1542,21 @@ ${renders}
       }
       return true;
     });
+    const blockTree = this.stripSharedLayoutBlockTreeNodes(
+      componentPlan.visualPlan.blockTree,
+      hasSharedHeader,
+      hasSharedFooter,
+    );
+    const blockTreeChanged =
+      (blockTree?.length ?? 0) !==
+        (componentPlan.visualPlan.blockTree?.length ?? 0) ||
+      JSON.stringify(blockTree ?? []) !==
+        JSON.stringify(componentPlan.visualPlan.blockTree ?? []);
 
-    if (sections.length === componentPlan.visualPlan.sections.length) {
+    if (
+      sections.length === componentPlan.visualPlan.sections.length &&
+      !blockTreeChanged
+    ) {
       return componentPlan;
     }
 
@@ -1010,7 +1564,7 @@ ${renders}
     // (siteInfo, menus, footerLinks) from the plan — otherwise CodeGeneratorService will
     // still emit fetches for them and the validator will reject the component.
     const chromeRemoved =
-      removedTypes.has('navbar') || removedTypes.has('footer');
+      removedTypes.has('navbar') || removedTypes.has('footer') || blockTreeChanged;
     const remainingSectionTypes = new Set(sections.map((s) => s.type));
     const stillNeedsChrome =
       remainingSectionTypes.has('navbar') ||
@@ -1028,9 +1582,59 @@ ${renders}
         ...componentPlan.visualPlan,
         runtimeRenderer: componentPlan.runtimeRenderer,
         sections,
+        blockTree,
         dataNeeds,
       },
     };
+  }
+
+  private stripSharedLayoutBlockTreeNodes(
+    blockTree: BlockNode[] | undefined,
+    hasSharedHeader: boolean,
+    hasSharedFooter: boolean,
+  ): BlockNode[] | undefined {
+    if (!blockTree?.length) return blockTree;
+    const shouldRemove = (node: BlockNode): boolean => {
+      const kind = String(node.kind ?? '').toLowerCase();
+      const blockName = String(node.blockName ?? '').toLowerCase();
+      const templatePartSlug = String(node.templatePartSlug ?? '').toLowerCase();
+      const refName = String(node.refName ?? '').toLowerCase();
+      const slug = templatePartSlug || refName;
+      if (hasSharedHeader) {
+        if (kind === 'header' || blockName === 'core/header') return true;
+        if (
+          kind === 'template-part' &&
+          (slug === 'header' || slug.startsWith('header'))
+        ) {
+          return true;
+        }
+      }
+      if (hasSharedFooter) {
+        if (kind === 'footer' || blockName === 'core/footer') return true;
+        if (
+          kind === 'template-part' &&
+          (slug === 'footer' || slug.startsWith('footer'))
+        ) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    const visit = (node: BlockNode): BlockNode | null => {
+      if (shouldRemove(node)) return null;
+      const children = (node.children ?? [])
+        .map(visit)
+        .filter((child): child is BlockNode => child !== null);
+      return {
+        ...node,
+        ...(children.length > 0 ? { children } : { children: undefined }),
+      };
+    };
+
+    return blockTree
+      .map(visit)
+      .filter((node): node is BlockNode => node !== null);
   }
 
   // ── Automated Repair ────────────────────────────────────────────────────────
@@ -1238,6 +1842,9 @@ ${renders}
     }
 
     const code = this.codeGenerator.generate(synchronizedVisualPlan);
+    const requiredCustomClassNames = this.collectCustomClassNamesFromBlockTree(
+      synchronizedVisualPlan.blockTree ?? [],
+    );
     return this.attachPlanContext(
       {
         ...component,
@@ -1247,6 +1854,7 @@ ${renders}
       effectivePlan,
       {
         generationMode: 'deterministic',
+        requiredCustomClassNames,
       },
     );
   }
@@ -1346,6 +1954,19 @@ ${renders}
   private collectCustomClassNamesFromNodes(nodes: WpNode[]): string[] {
     const result = new Set<string>();
     const visit = (node: WpNode) => {
+      for (const className of node.customClassNames ?? []) {
+        const normalized = className.trim();
+        if (normalized) result.add(normalized);
+      }
+      for (const child of node.children ?? []) visit(child);
+    };
+    for (const node of nodes) visit(node);
+    return [...result];
+  }
+
+  private collectCustomClassNamesFromBlockTree(nodes: BlockNode[]): string[] {
+    const result = new Set<string>();
+    const visit = (node: BlockNode) => {
       for (const className of node.customClassNames ?? []) {
         const normalized = className.trim();
         if (normalized) result.add(normalized);
@@ -2093,7 +2714,7 @@ ${renders}
     return source.includes('<!-- wp:');
   }
 
-  private async persistDraftComponents(
+  async persistDraftComponents(
     jobId: string,
     components: GeneratedComponent[],
   ): Promise<void> {

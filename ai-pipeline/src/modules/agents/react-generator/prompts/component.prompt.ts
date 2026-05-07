@@ -646,6 +646,47 @@ function hasAnyDataNeed(dataNeeds: string[], ...candidates: string[]): boolean {
   return candidates.some((candidate) => dataNeeds.includes(candidate));
 }
 
+function dataNeedsToPropNames(dataNeeds: string[]): string[] {
+  const props: string[] = [];
+  const add = (name: string) => {
+    if (!props.includes(name)) props.push(name);
+  };
+  for (const need of dataNeeds) {
+    switch (need) {
+      case 'posts':
+        add('posts');
+        break;
+      case 'products':
+        add('products');
+        break;
+      case 'pages':
+        add('pages');
+        break;
+      case 'menus':
+        add('menus');
+        break;
+      case 'siteInfo':
+        add('siteInfo');
+        break;
+      case 'footerLinks':
+        add('footerColumns');
+        break;
+    }
+  }
+  return props;
+}
+
+function buildSubcomponentPropsNote(dataNeeds: string[]): string {
+  const props = dataNeedsToPropNames(dataNeeds);
+  if (props.length === 0) return '';
+  return [
+    '## Child component data flow',
+    'This file is a child component. The parent page owns all fetching and route params.',
+    `Declare props for the runtime data you need: ${[...props, 'loading', 'error'].join(', ')}.`,
+    'Use those props directly in JSX. Do NOT call `fetch`, `useEffect` for API loading, `useState` for API data, or `useParams` inside this child.',
+  ].join('\n');
+}
+
 function buildScopedApiContractNote(input: {
   dataNeeds: string[];
   route?: string | null;
@@ -3232,6 +3273,7 @@ Render ONLY the JSX for the blocks in the template source below.`;
       input.repoManifest,
       input.componentPlan?.visualPlan,
     ),
+    buildSubcomponentPropsNote(normalizedDataNeeds),
     input.editRequestContextNote,
   ]
     .filter(Boolean)
