@@ -50,6 +50,13 @@ export class ReactVisualEditContractService {
       );
     }
 
+    const injectionViolation = detectPromptInjection(instructionText);
+    if (injectionViolation) {
+      throw new Error(
+        `Visual edit request rejected — prompt injection detected: ${injectionViolation}`,
+      );
+    }
+
     const attachments = normalizedRequest.attachments ?? [];
     const firstAttachment = attachments[0];
     const route =
@@ -340,5 +347,85 @@ function detectEditOperationFromInstruction(value: string): EditOperation {
   }
   if (hasContentSignal && !hasLayoutSignal) return 'change_content';
   return 'general';
+}
+
+const PROMPT_INJECTION_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
+  // Instruction override attempts
+  {
+    pattern: /ignore\s+(all\s+)?(previous|prior|above|earlier)\s+(instructions?|prompts?|context|rules?)/i,
+    label: 'instruction override',
+  },
+  {
+    pattern: /forget\s+(all\s+)?(previous|prior|above|your)\s+(instructions?|prompts?|context|rules?)/i,
+    label: 'instruction override',
+  },
+  {
+    pattern: /\bdisregard\s+(all\s+)?(previous|prior|above|your|the)\s+(instructions?|prompts?|context|rules?)/i,
+    label: 'instruction override',
+  },
+  {
+    pattern: /\bnew\s+(task|instruction|prompt|order)\s*:/i,
+    label: 'instruction override',
+  },
+  // Role/persona hijack
+  {
+    pattern: /\byou\s+are\s+now\b/i,
+    label: 'persona hijack',
+  },
+  {
+    pattern: /\bact\s+as\s+(a\s+)?(malicious|unrestricted|evil|hacker|DAN)/i,
+    label: 'persona hijack',
+  },
+  {
+    pattern: /\bpretend\s+(you\s+)?(are|have)\s+(no\s+)?(restrictions?|limits?|rules?|constraints?)/i,
+    label: 'persona hijack',
+  },
+  {
+    pattern: /\byou\s+have\s+no\s+(restrictions?|limits?|rules?|constraints?)/i,
+    label: 'persona hijack',
+  },
+  // Model-specific injection markers
+  {
+    pattern: /<<\s*SYS\s*>>|\[INST\]|\[\[INST\]\]|<\|system\|>|<\|user\|>/i,
+    label: 'model prompt marker injection',
+  },
+  {
+    pattern: /\bSYSTEM\s*:/,
+    label: 'system prompt injection',
+  },
+  // Jailbreak keywords
+  {
+    pattern: /\b(jailbreak|DAN mode|developer mode|unrestricted mode)\b/i,
+    label: 'jailbreak attempt',
+  },
+  // System prompt extraction
+  {
+    pattern: /\b(print|reveal|show|output|repeat|return)\s+(your\s+)?(system\s+prompt|instructions?|constraints?|rules?)\b/i,
+    label: 'system prompt extraction',
+  },
+  // Structural injection — mimicking the actual userPrompt format used in code-reviewer
+  {
+    pattern: /Edit\s+instruction\s*:/i,
+    label: 'prompt structure injection',
+  },
+  {
+    pattern: /Complete\s+TSX\s+file\s+to\s+modify/i,
+    label: 'prompt structure injection',
+  },
+  // Obfuscated payloads
+  {
+    pattern: /\batob\s*\(|base64\s*decode/i,
+    label: 'obfuscated payload',
+  },
+];
+
+/**
+ * Returns a short label string if a prompt injection pattern is found, otherwise null.
+ */
+function detectPromptInjection(value: string): string | null {
+  for (const { pattern, label } of PROMPT_INJECTION_PATTERNS) {
+    if (pattern.test(value)) return label;
+  }
+  return null;
 }
 
