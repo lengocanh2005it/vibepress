@@ -286,7 +286,10 @@ export class CodeReviewerService {
       `Snippet to modify:\n\`\`\`tsx\n${snippet}\n\`\`\`\n\n` +
       'Return only the modified lines, preserving original indentation. No fences, no explanation.';
 
-    await this.log(logPath, `[patch-snippet] ${label ?? 'snippet'}: ${instruction.slice(0, 120)}`);
+    await this.log(
+      logPath,
+      `[patch-snippet] ${label ?? 'snippet'}: ${instruction.slice(0, 120)}`,
+    );
 
     const result = await this.llmFactory.chat({
       model,
@@ -296,7 +299,10 @@ export class CodeReviewerService {
     });
 
     const raw = result.text ?? '';
-    return raw.replace(/^```[\w]*\n?/gm, '').replace(/^```$/gm, '').trim();
+    return raw
+      .replace(/^```[\w]*\n?/gm, '')
+      .replace(/^```$/gm, '')
+      .trim();
   }
 
   /**
@@ -315,7 +321,10 @@ export class CodeReviewerService {
       `Complete TSX file to modify:\n\`\`\`tsx\n${fileContent}\n\`\`\`\n\n` +
       'Return the complete modified file only. No markdown fences, no explanation.';
 
-    await this.log(logPath, `[rewrite-file] ${label ?? 'file'}: ${instruction.slice(0, 120)}`);
+    await this.log(
+      logPath,
+      `[rewrite-file] ${label ?? 'file'}: ${instruction.slice(0, 120)}`,
+    );
 
     const inputChars = userPrompt.length;
     this.logger.log(
@@ -333,7 +342,10 @@ export class CodeReviewerService {
     );
 
     const raw = result.text ?? '';
-    return raw.replace(/^```[\w]*\n?/gm, '').replace(/^```$/gm, '').trim();
+    return raw
+      .replace(/^```[\w]*\n?/gm, '')
+      .replace(/^```$/gm, '')
+      .trim();
   }
 
   /**
@@ -375,7 +387,10 @@ export class CodeReviewerService {
     );
 
     const raw = result.text ?? '';
-    return raw.replace(/^```[\w]*\n?/gm, '').replace(/^```$/gm, '').trim();
+    return raw
+      .replace(/^```[\w]*\n?/gm, '')
+      .replace(/^```$/gm, '')
+      .trim();
   }
 
   /**

@@ -417,8 +417,8 @@ describe('DbContentService theme-scoped filtering', () => {
       ),
     ).toMatchObject({
       routePath: '/title1',
-      templateCandidates: expect.arrayContaining(['template-services', 'page']),
-      matchedDbTemplateSlugs: ['template-services'],
+      templateCandidates: ['page'],
+      matchedDbTemplateSlugs: [],
     });
     expect(
       result.themeResolvedContent?.templateRecords

@@ -1,7 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import {
-  type EditOperation
-} from '../../edit-request/edit-operation.util.js';
+import { type EditOperation } from '../../edit-request/edit-operation.util.js';
 import type {
   PipelinePreviewRouteEntryDto,
   PipelineReactVisualEditRequestDto,
@@ -341,4 +339,3 @@ function detectEditOperationFromInstruction(value: string): EditOperation {
   if (hasContentSignal && !hasLayoutSignal) return 'change_content';
   return 'general';
 }
-

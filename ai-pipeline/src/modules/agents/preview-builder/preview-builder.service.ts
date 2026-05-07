@@ -355,37 +355,33 @@ export class PreviewBuilderService {
       }
     }
 
-    // Khi có Layout, Header/Footer đã được import bởi Layout — không cần import lại trong App.tsx
-    const layoutManagedNames = new Set(
-      [headerComp?.name, footerComp?.name].filter(Boolean) as string[],
-    );
-    const routeImports = allComponents
-      .filter((c) => !hasSharedLayout || !layoutManagedNames.has(c.name))
-      .map((c) => {
-        const folder =
-          isPartialComponentName(c.name) || c.isSubComponent
-            ? 'components'
-            : 'pages';
-        return `import ${c.name} from './${folder}/${c.name}';`;
-      })
-      .join('\n');
-
     // Tạo routes chỉ cho page components, tránh duplicate paths
     const usedPaths = new Set<string>();
     const usedPathOwners = new Map<string, string>();
     const routeLines: string[] = [];
     const routeEntries: PreviewRouteEntry[] = [];
+    const routedComponentNames = new Set<string>();
 
     for (const c of primaryPageComponents) {
       const componentPlan = planByComponentName.get(c.name);
       const canonicalFixedPagePath =
         this.buildFixedPageCanonicalRoute(componentPlan);
-      const path =
+      const candidatePath =
         canonicalFixedPagePath ??
         planRouteMap.get(c.name) ??
         c.route ??
         FALLBACK_ROUTE_MAP[c.name] ??
         `/${c.name.toLowerCase()}`;
+      const path = this.resolveCanonicalPreviewRoute({
+        componentName: c.name,
+        candidatePath,
+      });
+      if (!path) {
+        this.logger.debug(
+          `Skipping non-runtime preview route "${candidatePath}" for "${c.name}"`,
+        );
+        continue;
+      }
       if (usedPaths.has(path)) {
         this.logger.warn(
           `Duplicate preview route "${path}" for "${c.name}" ignored; already owned by "${usedPathOwners.get(path) ?? 'unknown'}"`,
@@ -398,6 +394,7 @@ export class PreviewBuilderService {
         `        <Route path="${path}" element={<${c.name} />} />`,
       );
       routeEntries.push({ route: path, componentName: c.name });
+      routedComponentNames.add(c.name);
     }
 
     // WordPress archive fallback: if Archive exists but no Author/Category/Tag,
@@ -417,6 +414,7 @@ export class PreviewBuilderService {
             `        <Route path="${alias.path}" element={<Archive />} />`,
           );
           routeEntries.push({ route: alias.path, componentName: 'Archive' });
+          routedComponentNames.add('Archive');
         }
       }
     }
@@ -431,6 +429,7 @@ export class PreviewBuilderService {
         route: '/',
         componentName: primaryPageComponents[0].name,
       });
+      routedComponentNames.add(primaryPageComponents[0].name);
     }
 
     // Register the catch-all route explicitly at the end so 404 handling
@@ -451,11 +450,29 @@ export class PreviewBuilderService {
           route: notFoundPath,
           componentName: notFoundComponent.name,
         });
+        routedComponentNames.add(notFoundComponent.name);
       }
     }
 
     const routes = routeLines.join('\n');
     const smokeRoutes = this.buildSmokeRoutes([...usedPaths]);
+
+    // Khi có Layout, Header/Footer đã được import bởi Layout — không cần import lại trong App.tsx.
+    // Chỉ import các component thật sự được mount route để tránh expose template inventory.
+    const layoutManagedNames = new Set(
+      [headerComp?.name, footerComp?.name].filter(Boolean) as string[],
+    );
+    const routeImports = allComponents
+      .filter((c) => routedComponentNames.has(c.name))
+      .filter((c) => !hasSharedLayout || !layoutManagedNames.has(c.name))
+      .map((c) => {
+        const folder =
+          isPartialComponentName(c.name) || c.isSubComponent
+            ? 'components'
+            : 'pages';
+        return `import ${c.name} from './${folder}/${c.name}';`;
+      })
+      .join('\n');
 
     const layoutImport = hasSharedLayout
       ? `import Layout from './components/Layout';`
@@ -3285,6 +3302,38 @@ ${fontEntries}
       (path) => path === '/' || (!path.includes(':') && path !== '*'),
     );
     return [...new Set(staticRoutes.length > 0 ? staticRoutes : ['/'])];
+  }
+
+  private resolveCanonicalPreviewRoute(input: {
+    componentName: string;
+    candidatePath: string;
+  }): string | null {
+    const path = this.normalizePreviewRoute(input.candidatePath);
+    if (!path) return null;
+    if (path === '/') return '/';
+
+    const componentName = input.componentName.toLowerCase();
+    if (
+      path === '/page/:slug' &&
+      ['page', 'runtimepage'].includes(componentName)
+    ) {
+      return '/page/:slug';
+    }
+    if (
+      path === '/post/:slug' &&
+      ['single', 'singlewithsidebar'].includes(componentName)
+    ) {
+      return '/post/:slug';
+    }
+
+    return null;
+  }
+
+  private normalizePreviewRoute(route: string): string {
+    const trimmed = String(route ?? '').trim();
+    if (!trimmed) return '';
+    if (trimmed === '*') return '*';
+    return trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
   }
 
   private buildFixedPageCanonicalRoute(

@@ -28,6 +28,29 @@ describe('PreviewBuilderService', () => {
     expect(normalized).not.toContain('/ className="vp-generated-image">');
   });
 
+  it('keeps preview routes limited to runtime canonical routes', () => {
+    const resolveRoute = (componentName: string, candidatePath: string) =>
+      (service as any).resolveCanonicalPreviewRoute({
+        componentName,
+        candidatePath,
+      });
+
+    expect(resolveRoute('FrontPage', '/')).toBe('/');
+    expect(resolveRoute('RuntimePage', '/page/:slug')).toBe('/page/:slug');
+    expect(resolveRoute('Page', '/page/:slug')).toBe('/page/:slug');
+    expect(resolveRoute('Single', '/post/:slug')).toBe('/post/:slug');
+
+    expect(resolveRoute('Index', '/blog')).toBeNull();
+    expect(resolveRoute('Archive', '/archive')).toBeNull();
+    expect(resolveRoute('ArchiveProduct', '/products')).toBeNull();
+    expect(resolveRoute('Blank', '/blank/:slug')).toBeNull();
+    expect(resolveRoute('BlogLeftSidebar', '/blog-left-sidebar')).toBeNull();
+    expect(resolveRoute('Cart', '/cart')).toBeNull();
+    expect(resolveRoute('Checkout', '/checkout')).toBeNull();
+    expect(resolveRoute('TemplateAbout', '/template-about')).toBeNull();
+    expect(resolveRoute('TemplateServices', '/template-services')).toBeNull();
+  });
+
   it('injects theme style.css into preview css for theme-specific nav interactions', async () => {
     const rootDir = await mkdtemp(join(tmpdir(), 'vp-preview-builder-'));
 
