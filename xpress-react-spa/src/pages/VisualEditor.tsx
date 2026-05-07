@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+﻿import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 import {
   AiProcessError,
@@ -181,40 +181,6 @@ const normalizeVisualEditText = (value: string) =>
     .replace(/Đ/g, "D")
     .replace(/\s+/g, " ");
 
-const detectUnsupportedVisualEditReason = (value: string) => {
-  const normalized = normalizeVisualEditText(value);
-  if (!normalized) return undefined;
-
-  if (
-    /\b(add|insert|create|introduce|implement|them|chen|tao moi|bo sung)\b/.test(normalized) &&
-    /\b(section|component|widget|feature|module|carousel|slider|modal|popup|tabs|accordion|faq|newsletter|form|chat|chatbot)\b/.test(normalized)
-  ) {
-    return "add-section-or-component";
-  }
-
-  if (
-    /\b(replace|convert|switch|swap|thay the|doi thanh|chuyen thanh)\b/.test(normalized) &&
-    /\b(section|component|widget|layout block|hero|banner|carousel|slider|modal|tabs|accordion|faq)\b/.test(normalized)
-  ) {
-    return "replace-section-or-component";
-  }
-
-  if (
-    /\b(remove|delete|drop|xoa|bo)\b/.test(normalized) &&
-    /\b(section|component|widget|block|hero|banner|carousel|slider|modal|tabs|accordion|faq)\b/.test(normalized)
-  ) {
-    return "remove-section-or-component";
-  }
-
-  if (
-    /\b(font|typography|font-size|text size|line-height|letter-spacing|font weight|chu|co chu)\b/.test(normalized)
-  ) {
-    return "typography-change";
-  }
-
-  return undefined;
-};
-
 const isBroadVisualEditRequest = (value: string) =>
   /\b(migrate|migration|full site|whole site|entire site|all pages|toan bo|toan site|toan website|ca trang)\b/.test(
     normalizeVisualEditText(value),
@@ -239,20 +205,7 @@ const isMeaningfulVisualEditPrompt = (value: string) => {
   ].includes(normalized);
 };
 
-const getUnsupportedVisualEditMessage = (reason?: string) => {
-  switch (reason) {
-    case "add-section-or-component":
-      return "Visual edit này chỉ hỗ trợ chỉnh cục bộ trên app React hiện tại. Thêm section/widget/feature mới chưa được hỗ trợ ở đây.";
-    case "replace-section-or-component":
-      return "Visual edit này chỉ hỗ trợ chỉnh cục bộ. Thay nguyên section/component chưa được hỗ trợ ở đây.";
-    case "remove-section-or-component":
-      return "Visual edit này chỉ hỗ trợ chỉnh cục bộ. Xóa section/component chưa được hỗ trợ ở đây.";
-    case "typography-change":
-      return "Visual edit này hiện chưa hỗ trợ thay đổi typography đơn lẻ.";
-    default:
-      return "Yêu cầu visual edit chưa nằm trong phạm vi hỗ trợ.";
-  }
-};
+
 
 const VisualEditor: React.FC = () => {
   const location = useLocation();
@@ -630,20 +583,6 @@ const VisualEditor: React.FC = () => {
           id: `broad-${Date.now()}`,
           role: "assistant",
           text: "Luồng này chỉ sửa cục bộ trên app React đã generate. Nếu muốn migrate lại toàn site hoặc sửa rộng nhiều page, hãy dùng pipeline chính.",
-          tone: "error",
-        },
-      ]);
-      return;
-    }
-
-    const unsupportedReason = detectUnsupportedVisualEditReason(prompt);
-    if (unsupportedReason) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: `unsupported-${Date.now()}`,
-          role: "assistant",
-          text: getUnsupportedVisualEditMessage(unsupportedReason),
           tone: "error",
         },
       ]);
