@@ -628,7 +628,9 @@ export class PlannerService {
         `Done: ${withPlan}/${result.length} components have pre-computed visual plans`,
       ),
     );
-    const missingVisualPlans = result.filter((component) => !component.visualPlan);
+    const missingVisualPlans = result.filter(
+      (component) => !component.visualPlan,
+    );
     if (missingVisualPlans.length > 0) {
       const runtimeOnly = missingVisualPlans.filter(
         (component) => component.runtimeRenderer === 'runtime-page',
@@ -648,9 +650,7 @@ export class PlannerService {
         );
       }
       this.logger.log(
-        this.formatPhaseCLog(
-          `Missing visual plans: ${parts.join(' | ')}`,
-        ),
+        this.formatPhaseCLog(`Missing visual plans: ${parts.join(' | ')}`),
       );
     }
 
@@ -3900,32 +3900,30 @@ export class PlannerService {
         'core/comment-template',
         'comment-template',
       ) || source.includes('comments capability');
-    const hasPostAuxiliary =
-      hasBlock(
-        'core/post-title',
-        'post-title',
-        'core/post-featured-image',
-        'post-featured-image',
-        'core/post-terms',
-        'post-terms',
-        'core/post-date',
-        'post-date',
-        'core/post-author-name',
-        'post-author-name',
-      );
-    const hasSidebarPostWidgets =
-      hasBlock(
-        'core/latest-posts',
-        'latest-posts',
-        'core/categories',
-        'categories',
-        'core/tag-cloud',
-        'tag-cloud',
-        'core/avatar',
-        'avatar',
-        'core/post-author-biography',
-        'post-author-biography',
-      );
+    const hasPostAuxiliary = hasBlock(
+      'core/post-title',
+      'post-title',
+      'core/post-featured-image',
+      'post-featured-image',
+      'core/post-terms',
+      'post-terms',
+      'core/post-date',
+      'post-date',
+      'core/post-author-name',
+      'post-author-name',
+    );
+    const hasSidebarPostWidgets = hasBlock(
+      'core/latest-posts',
+      'latest-posts',
+      'core/categories',
+      'categories',
+      'core/tag-cloud',
+      'tag-cloud',
+      'core/avatar',
+      'avatar',
+      'core/post-author-biography',
+      'post-author-biography',
+    );
 
     if (isPartial) {
       if (hasSidebarPostWidgets) needs.add('posts');
@@ -3938,7 +3936,10 @@ export class PlannerService {
 
     if (isSingleProduct || (isProductSurface && componentPlan.isDetail)) {
       needs.add('product-detail');
-    } else if (isSinglePost || componentPlan.dataNeeds.includes('post-detail')) {
+    } else if (
+      isSinglePost ||
+      componentPlan.dataNeeds.includes('post-detail')
+    ) {
       needs.add('post-detail');
     } else if (
       isPageDetailTemplate &&
@@ -7288,7 +7289,10 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       existingTemplateNames.has('author') ||
       existingTemplateNames.has('category');
 
-    if (!hasArchiveVariant && (!content || this.hasPostArchiveEvidence(content))) {
+    if (
+      !hasArchiveVariant &&
+      (!content || this.hasPostArchiveEvidence(content))
+    ) {
       filteredTemplates.push(
         createFallbackTemplate(
           'archive',
@@ -7442,7 +7446,11 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
 
     const usedTemplateBases = this.collectUsedFseTemplateBases(content);
     const keptTemplates = theme.templates.filter((template) =>
-      this.shouldKeepFseTemplateTarget(template.name, usedTemplateBases, content),
+      this.shouldKeepFseTemplateTarget(
+        template.name,
+        usedTemplateBases,
+        content,
+      ),
     );
     const referencedPartBases =
       this.collectReferencedTemplatePartBases(keptTemplates);
@@ -7455,10 +7463,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       const base = this.normalizeWordPressTemplateName(part.name);
       if (!base) return true;
       if (referencedPartBases.has(base)) return true;
-      if (
-        declaredPartBases.has(base) &&
-        ['header', 'footer'].includes(base)
-      ) {
+      if (declaredPartBases.has(base) && ['header', 'footer'].includes(base)) {
         return true;
       }
       return false;
@@ -7497,7 +7502,8 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     for (const route of content.themeResolvedContent?.routes ?? []) {
       add(route.template);
       addPageSlugFamily(route.slug);
-      for (const templateName of route.templateCandidates ?? []) add(templateName);
+      for (const templateName of route.templateCandidates ?? [])
+        add(templateName);
       for (const templateName of route.matchedDbTemplateSlugs ?? []) {
         add(templateName);
       }
@@ -7515,8 +7521,12 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     if (!base) return true;
     if (usedTemplateBases.has(base)) return true;
 
-    if (this.isWooCommerceTemplateBase(base)) {
-      return this.hasWooCommerceContentEvidence(content);
+    if (this.isWooCommerceArchiveTemplateBase(base)) {
+      return this.hasWooCommerceArchiveRouteEvidence(content);
+    }
+
+    if (this.isWooCommerceProductDetailTemplateBase(base)) {
+      return this.hasWooCommerceProductDetailRouteEvidence(content);
     }
 
     if (this.isCoreFseTemplateBase(base)) {
@@ -7575,28 +7585,121 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     return true;
   }
 
-  private isWooCommerceTemplateBase(templateName: string): boolean {
+  private isWooCommerceArchiveTemplateBase(templateName: string): boolean {
     return (
-      templateName === 'single-product' ||
       templateName === 'archive-product' ||
-      /^taxonomy-product[-_]/.test(templateName) ||
-      /^product[-_]/.test(templateName)
+      /^taxonomy-product[-_]/.test(templateName)
     );
   }
 
-  private hasWooCommerceContentEvidence(content: DbContentResult): boolean {
+  private isWooCommerceProductDetailTemplateBase(
+    templateName: string,
+  ): boolean {
     return (
-      (content.capabilities?.activePluginSlugs ?? []).some((slug) =>
-        /woocommerce|woo/i.test(slug),
-      ) ||
-      (content.plugins ?? []).some(
-        (plugin) => plugin.active && /woocommerce|woo/i.test(plugin.slug),
-      ) ||
-      (content.customPostTypes ?? []).some(
-        (postType) =>
-          postType.postType === 'product' && Number(postType.count ?? 0) > 0,
-      )
+      templateName === 'single-product' || /^product[-_]/.test(templateName)
     );
+  }
+
+  private hasWooCommerceArchiveRouteEvidence(
+    content: DbContentResult,
+  ): boolean {
+    return this.collectRuntimeRouteEvidence(content).some((value) =>
+      this.isWooCommerceArchiveRouteEvidence(value),
+    );
+  }
+
+  private hasWooCommerceProductDetailRouteEvidence(
+    content: DbContentResult,
+  ): boolean {
+    return this.collectRuntimeRouteEvidence(content).some((value) =>
+      this.isWooCommerceProductDetailRouteEvidence(value),
+    );
+  }
+
+  private collectRuntimeRouteEvidence(content: DbContentResult): string[] {
+    return [
+      ...(content.pages ?? []).flatMap((page) => [
+        page.slug,
+        page.title,
+        page.template,
+        page.content,
+      ]),
+      ...(content.posts ?? []).flatMap((post) => [
+        post.slug,
+        post.title,
+        post.content,
+        post.excerpt,
+      ]),
+      ...(content.themeResolvedContent?.routes ?? []).flatMap((route) => [
+        route.slug,
+        route.title,
+        route.routePath,
+        route.template,
+        ...route.templateCandidates,
+        ...route.matchedDbTemplateSlugs,
+        ...route.pageBlockTypes,
+      ]),
+      ...(content.dbNavigations ?? []).flatMap((navigation) => [
+        navigation.slug,
+        navigation.title,
+        navigation.content,
+        ...navigation.items.flatMap((item) => [item.title, item.url]),
+        ...navigation.blockTypes,
+      ]),
+      ...(content.menus ?? []).flatMap((menu) => [
+        menu.slug,
+        menu.name,
+        ...(menu.location ? [menu.location] : []),
+        ...menu.items.flatMap((item) => [item.title, item.url]),
+      ]),
+      ...(content.dbTemplates ?? []).flatMap((template) => [
+        template.slug,
+        template.canonicalSlug,
+        template.title,
+        template.content,
+        ...template.blockTypes,
+      ]),
+    ]
+      .map((value) =>
+        String(value ?? '')
+          .trim()
+          .toLowerCase(),
+      )
+      .filter(Boolean);
+  }
+
+  private isWooCommerceArchiveRouteEvidence(value: string): boolean {
+    if (
+      /(^|[/"'\s])(?:shop|products)(?:[/"'\s?#]|$)/i.test(value) ||
+      /(?:^|[?&])post_type=product(?:&|$)/i.test(value)
+    ) {
+      return true;
+    }
+    return [
+      'archive-product',
+      'taxonomy-product_cat',
+      'taxonomy-product_tag',
+      'woocommerce/product-query',
+      'woocommerce/product-collection',
+      'woocommerce/product-results-count',
+      'woocommerce/catalog-sorting',
+    ].some((needle) => value.includes(needle));
+  }
+
+  private isWooCommerceProductDetailRouteEvidence(value: string): boolean {
+    if (
+      /(^|[/"'\s])product\/[^/"'\s?#]+/i.test(value) ||
+      /(?:^|[?&])post_type=product(?:&|$)/i.test(value)
+    ) {
+      return true;
+    }
+    return [
+      'single-product',
+      'woocommerce/single-product',
+      'woocommerce/product-details',
+      'woocommerce/add-to-cart-form',
+      'woocommerce/product-image-gallery',
+    ].some((needle) => value.includes(needle));
   }
 
   private hasPostArchiveEvidence(content: DbContentResult): boolean {
@@ -8649,9 +8752,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       }
     }
     if (inferredDataNeeds.length > 0) {
-      lines.push(
-        `- Source-implied dataNeeds: ${inferredDataNeeds.join(', ')}`,
-      );
+      lines.push(`- Source-implied dataNeeds: ${inferredDataNeeds.join(', ')}`);
     }
 
     if (['front-page', 'home', 'index'].includes(templateName)) {

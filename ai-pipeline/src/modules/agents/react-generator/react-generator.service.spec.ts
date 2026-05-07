@@ -289,12 +289,14 @@ describe('ReactGeneratorService source-faithful page policy', () => {
     } as unknown as CodeGeneratorService;
     const codeReviewer = {
       reviewComponent: jest.fn(),
-      reviewSection: jest.fn(async ({ sectionName }: { sectionName: string }) => ({
-        name: sectionName,
-        filePath: '',
-        code: `export default function ${sectionName}(){return <section>${sectionName}</section>;}`,
-        isSubComponent: true,
-      })),
+      reviewSection: jest.fn(
+        async ({ sectionName }: { sectionName: string }) => ({
+          name: sectionName,
+          filePath: '',
+          code: `export default function ${sectionName}(){return <section>${sectionName}</section>;}`,
+          isSubComponent: true,
+        }),
+      ),
     } as unknown as CodeReviewerService;
     const service = new ReactGeneratorService(
       { getModel: jest.fn(() => 'gpt-test') } as never,
@@ -455,12 +457,14 @@ describe('ReactGeneratorService source-faithful page policy', () => {
     } as unknown as CodeGeneratorService;
     const codeReviewer = {
       reviewComponent: jest.fn(),
-      reviewSection: jest.fn(async ({ sectionName }: { sectionName: string }) => ({
-        name: sectionName,
-        filePath: '',
-        code: `export default function ${sectionName}(){return <section>${sectionName}</section>;}`,
-        isSubComponent: true,
-      })),
+      reviewSection: jest.fn(
+        async ({ sectionName }: { sectionName: string }) => ({
+          name: sectionName,
+          filePath: '',
+          code: `export default function ${sectionName}(){return <section>${sectionName}</section>;}`,
+          isSubComponent: true,
+        }),
+      ),
     } as unknown as CodeReviewerService;
     const service = new ReactGeneratorService(
       { getModel: jest.fn(() => 'gpt-test') } as never,
@@ -582,12 +586,14 @@ describe('ReactGeneratorService source-faithful page policy', () => {
     } as unknown as CodeGeneratorService;
     const codeReviewer = {
       reviewComponent: jest.fn(),
-      reviewSection: jest.fn(async ({ sectionName }: { sectionName: string }) => ({
-        name: sectionName,
-        filePath: '',
-        code: `export default function ${sectionName}(){return <section>${sectionName}</section>;}`,
-        isSubComponent: true,
-      })),
+      reviewSection: jest.fn(
+        async ({ sectionName }: { sectionName: string }) => ({
+          name: sectionName,
+          filePath: '',
+          code: `export default function ${sectionName}(){return <section>${sectionName}</section>;}`,
+          isSubComponent: true,
+        }),
+      ),
     } as unknown as CodeReviewerService;
     const service = new ReactGeneratorService(
       { getModel: jest.fn(() => 'gpt-test') } as never,
@@ -733,8 +739,9 @@ describe('ReactGeneratorService source-faithful page policy', () => {
       'TemplateServicesFAQ',
     ]);
     expect(
-      result.find((component) => component.name === 'TemplateServicesUIUXDesign')
-        ?.visualPlan?.sections,
+      result.find(
+        (component) => component.name === 'TemplateServicesUIUXDesign',
+      )?.visualPlan?.sections,
     ).toHaveLength(1);
     expect(
       result.find(
@@ -754,12 +761,14 @@ describe('ReactGeneratorService source-faithful page policy', () => {
     } as unknown as CodeGeneratorService;
     const codeReviewer = {
       reviewComponent: jest.fn(),
-      reviewSection: jest.fn(async ({ sectionName }: { sectionName: string }) => ({
-        name: sectionName,
-        filePath: '',
-        code: `export default function ${sectionName}(){return <section>${sectionName}</section>;}`,
-        isSubComponent: true,
-      })),
+      reviewSection: jest.fn(
+        async ({ sectionName }: { sectionName: string }) => ({
+          name: sectionName,
+          filePath: '',
+          code: `export default function ${sectionName}(){return <section>${sectionName}</section>;}`,
+          isSubComponent: true,
+        }),
+      ),
     } as unknown as CodeReviewerService;
     const service = new ReactGeneratorService(
       { getModel: jest.fn(() => 'gpt-test') } as never,

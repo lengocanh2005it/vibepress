@@ -976,8 +976,14 @@ describe('block-tree canonical profolio pages', () => {
                 ' products-block-post-template ',
               ],
               children: [
-                { kind: 'product-image', blockName: 'woocommerce/product-image' },
-                { kind: 'product-price', blockName: 'woocommerce/product-price' },
+                {
+                  kind: 'product-image',
+                  blockName: 'woocommerce/product-image',
+                },
+                {
+                  kind: 'product-price',
+                  blockName: 'woocommerce/product-price',
+                },
               ],
             },
           ],

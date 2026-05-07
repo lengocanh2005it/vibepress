@@ -58,11 +58,15 @@ describe('mapWpNodesToDraftSections', () => {
       'faq',
       'articles',
     ]);
-    expect(sections.find((section) => section.type === 'accordion')).toMatchObject({
+    expect(
+      sections.find((section) => section.type === 'accordion'),
+    ).toMatchObject({
       type: 'accordion',
       title: 'Frequently Asked Questions',
     });
-    expect(sections.find((section) => section.type === 'post-list')).toMatchObject({
+    expect(
+      sections.find((section) => section.type === 'post-list'),
+    ).toMatchObject({
       type: 'post-list',
       title: 'Recent Blog Posts',
       layout: 'grid-3',

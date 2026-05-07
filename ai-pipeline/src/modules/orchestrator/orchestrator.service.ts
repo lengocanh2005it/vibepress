@@ -2300,8 +2300,10 @@ export default function ${component.name}() {
                       targetComponent,
                     );
                   if (sanitized.code !== targetComponent.code) {
-                    const sanitizedValidation =
-                      validateCandidateInComponentSet(sanitized, compIndex);
+                    const sanitizedValidation = validateCandidateInComponentSet(
+                      sanitized,
+                      compIndex,
+                    );
                     if (!sanitizedValidation.failure) {
                       this.logger.log(
                         `[Stage 4: D4 Validator] Deterministically sanitized "${failure.component.name}" before AI fix.`,
@@ -2670,8 +2672,7 @@ export default function ${component.name}() {
                         component: regeneratedValidation.component,
                       };
                     }
-                    const regeneratedErr =
-                      regeneratedValidation.failure?.error;
+                    const regeneratedErr = regeneratedValidation.failure?.error;
                     this.recordFullComponentRegenerationSummary(summaryDraft, {
                       stage: 'stage5-review-fix',
                       componentName: failure.componentName,
@@ -3201,7 +3202,7 @@ export default function ${component.name}() {
           const skipPromise = waitForVisualCompareSkipRequest().then(
             async () => {
               await skipVisualCompareIfRequested(
-              'Visual compare was skipped while metric collection was still running.',
+                'Visual compare was skipped while metric collection was still running.',
               );
               return null;
             },
@@ -5230,7 +5231,9 @@ export default function ${component.name}() {
     componentPlan?: PlanResult[number],
   ): boolean {
     const normalizedEntryRoute = this.normalizeComparableRoute(entry.route);
-    const normalizedPlanRoute = this.normalizeComparableRoute(componentPlan?.route);
+    const normalizedPlanRoute = this.normalizeComparableRoute(
+      componentPlan?.route,
+    );
     if (!normalizedEntryRoute || !normalizedPlanRoute) return false;
     if (normalizedEntryRoute === normalizedPlanRoute) return false;
     if (!normalizedEntryRoute.includes(':')) return false;
@@ -8063,11 +8066,7 @@ export default function ${component.name}() {
         .split('/')
         .pop()
         ?.replace(/\.(?:js|jsx|ts|tsx)$/, '');
-      if (
-        basename &&
-        basename === localName &&
-        componentNames.has(localName)
-      ) {
+      if (basename && basename === localName && componentNames.has(localName)) {
         return true;
       }
     }

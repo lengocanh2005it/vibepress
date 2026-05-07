@@ -813,20 +813,20 @@ export class CodeGeneratorService {
   private needsRouter(plan: ComponentVisualPlan): boolean {
     if (
       plan.sections.some((s) =>
-      [
-        'navbar',
-        'footer',
-        'breadcrumb',
-        'post-list',
-        'post-content',
-        'post-meta',
-        'post-terms',
-        'post-navigation',
-        'search',
-        'sidebar',
-        'hero',
-        'cover',
-      ].includes(s.type),
+        [
+          'navbar',
+          'footer',
+          'breadcrumb',
+          'post-list',
+          'post-content',
+          'post-meta',
+          'post-terms',
+          'post-navigation',
+          'search',
+          'sidebar',
+          'hero',
+          'cover',
+        ].includes(s.type),
       )
     ) {
       return true;
@@ -2583,8 +2583,9 @@ ${indent}</div>`;
         (candidate) => candidate.kind === 'cart-cross-sells-block',
       ) ?? 'You may be interested in…';
     const emptyCartTitle =
-      this.findFirstDescendantText(node, (candidate) =>
-        candidate.kind === 'empty-cart-block',
+      this.findFirstDescendantText(
+        node,
+        (candidate) => candidate.kind === 'empty-cart-block',
       ) ?? 'Your cart is currently empty!';
     const newInStoreTitle =
       this.findFirstDescendantText(
@@ -2654,9 +2655,10 @@ ${indent}</section>`;
   ): string | undefined {
     const roots = this.findBlockTreeDescendants(node, rootMatcher);
     for (const root of roots) {
-      const textNode = this.findBlockTreeDescendants(root, textNodeMatcher).find(
-        (candidate) => candidate.text?.trim(),
-      );
+      const textNode = this.findBlockTreeDescendants(
+        root,
+        textNodeMatcher,
+      ).find((candidate) => candidate.text?.trim());
       const text = textNode?.text?.trim();
       if (text) return text;
     }
