@@ -19,6 +19,7 @@ import type {
   PostTermsSection,
   PostTitleSection,
   SearchSection,
+  SectionButtonStyle,
   SectionPlan,
   SidebarSection,
   SidebarWidget,
@@ -340,7 +341,7 @@ function shouldUseCanonicalBlockTreePageRenderer(input: {
   content: DbContentResult;
   draftBlockTree?: BlockNode[];
 }): boolean {
-  if (input.componentPlan.type !== 'page' || input.componentPlan.isDetail) {
+  if (input.componentPlan.type !== 'page') {
     return false;
   }
   if ((input.draftBlockTree?.length ?? 0) === 0) {
@@ -349,7 +350,13 @@ function shouldUseCanonicalBlockTreePageRenderer(input: {
   if (input.content.themeResolvedContent?.themeSlug !== 'profolio-fse') {
     return false;
   }
-  return false;
+  return (
+    isEligibleBlockTreeDetailTemplate(input.componentPlan) ||
+    isEligibleBlockTreeListingTemplate(
+      input.componentPlan,
+      input.draftBlockTree,
+    )
+  );
 }
 
 function isEligibleBlockTreeSharedPartial(
@@ -441,6 +448,7 @@ function buildBlockTreeDrivenSharedPartialSections(input: {
       (node) => node.kind === 'site-title',
     );
     const cta = inferNavbarCtaFromBlockTree(orderedNodes);
+    const ctaStyle = inferNavbarCtaStyleFromBlockTree(orderedNodes);
     const stickySignalNode = orderedNodes.find(isStickyChromeNode);
     const sourceNode =
       navigationNode ??
@@ -463,6 +471,7 @@ function buildBlockTreeDrivenSharedPartialSections(input: {
       showSiteTitle: Boolean(siteTitleNode),
       ...(siteLogoNode?.width ? { logoWidth: `${siteLogoNode.width}px` } : {}),
       ...(cta ? { cta } : {}),
+      ...(ctaStyle ? { ctaStyle } : {}),
       ...(sourceNode?.sourceRef ? { sourceRef: sourceNode.sourceRef } : {}),
       debugKey: 'navbar-0',
     };
@@ -537,6 +546,7 @@ function decorateNavbarSectionFromBlockTree(
   const siteLogoNode = orderedNodes.find((node) => node.kind === 'site-logo');
   const siteTitleNode = orderedNodes.find((node) => node.kind === 'site-title');
   const cta = inferNavbarCtaFromBlockTree(orderedNodes);
+  const ctaStyle = inferNavbarCtaStyleFromBlockTree(orderedNodes);
   const stickySignalNode = orderedNodes.find(isStickyChromeNode);
 
   return {
@@ -564,6 +574,7 @@ function decorateNavbarSectionFromBlockTree(
         ? { logoWidth: `${siteLogoNode.width}px` }
         : {}),
     ...(section.cta ? {} : cta ? { cta } : {}),
+    ...(section.ctaStyle ? {} : ctaStyle ? { ctaStyle } : {}),
     ...(section.sourceRef
       ? {}
       : navigationNode?.sourceRef
@@ -746,6 +757,31 @@ function inferNavbarCtaFromBlockTree(
         }
       : {}),
   };
+}
+
+function inferNavbarCtaStyleFromBlockTree(
+  nodes: BlockNode[],
+): SectionButtonStyle | undefined {
+  const ctaNode = nodes.find(
+    (node) =>
+      node.kind === 'button' &&
+      typeof node.text === 'string' &&
+      node.text.trim().length > 0,
+  );
+  if (!ctaNode) return undefined;
+  const style: SectionButtonStyle = {};
+  if (ctaNode.bgColor) style.background = ctaNode.bgColor;
+  if (ctaNode.textColor) style.color = ctaNode.textColor;
+  if (ctaNode.borderRadius) style.borderRadius = ctaNode.borderRadius;
+  if (ctaNode.padding) style.padding = blockSpacingToCss(ctaNode.padding);
+  return Object.keys(style).length > 0 ? style : undefined;
+}
+
+function blockSpacingToCss(box: NonNullable<BlockNode['padding']>): string {
+  const { top = '0', right = top, bottom = top, left = right } = box;
+  if (top === right && top === bottom && top === left) return top;
+  if (top === bottom && right === left) return `${top} ${right}`;
+  return `${top} ${right} ${bottom} ${left}`;
 }
 
 function isStickyChromeNode(node: BlockNode): boolean {

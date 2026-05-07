@@ -91,6 +91,50 @@ describe('ValidatorService render-contract coverage', () => {
     expect(issue).toBeNull();
   });
 
+  it('accepts source text rendered inside rich HTML strings', () => {
+    const renderContract = {
+      version: 1,
+      sourceModel: {
+        kind: 'block-tree',
+        blockTree: [
+          {
+            kind: 'paragraph',
+            blockName: 'core/paragraph',
+            html: '<p>Developed By <a href="#">Themegrove.com</a></p>',
+            children: [],
+          },
+        ],
+      },
+      structure: {
+        renderMode: 'block-tree',
+        sharedChrome: {},
+        subtreeBindings: [],
+      },
+      preserveRules,
+    } as unknown as ComponentRenderContract;
+
+    const issue = (
+      service as unknown as {
+        checkRenderContractCoverage: (
+          code: string,
+          renderContract?: ComponentRenderContract,
+          componentName?: string,
+          visualPlan?: ComponentVisualPlan,
+        ) => string | null;
+      }
+    ).checkRenderContractCoverage(
+      `
+        <footer>
+          {renderRichTextChildren("Developed By <a href=\\"#\\">Themegrove.com</a>", "footer::paragraph::0.1.0.0")}
+        </footer>
+      `,
+      renderContract,
+      'Footer',
+    );
+
+    expect(issue).toBeNull();
+  });
+
   it('does not require footer-links for CTA-style footer partials whose plan has no footer link columns', () => {
     const check = (
       service as unknown as {
@@ -579,8 +623,15 @@ describe('ValidatorService derived collection bindings', () => {
 
       export default function FrontPage() {
         return (
-          <section style={{ backgroundImage: "url('theme-asset:/assets/images/banner.jpg')" }}>
+          <section style={{ backgroundImage: \`url('theme-asset:/assets/images/banner.jpg')\` }}>
             <img src="theme-asset:/assets/images/banner-image.png" alt="" />
+            {[
+              {
+                image: 'theme-asset:/assets/images/projects-1.jpg',
+              },
+            ].map((item) => (
+              <div style={{ backgroundImage: \`url('\${item.image}')\` }} />
+            ))}
           </section>
         );
       }
@@ -592,6 +643,12 @@ describe('ValidatorService derived collection bindings', () => {
     );
     expect(code).toContain(
       'src={resolveAsset("theme-asset:/assets/images/banner-image.png")}',
+    );
+    expect(code).toContain(
+      'image: resolveAsset("theme-asset:/assets/images/projects-1.jpg")',
+    );
+    expect(code).toContain(
+      'backgroundImage: `url("${resolveAsset(item.image)}")`',
     );
     expect(code).toContain('const resolveThemeAsset = (src?: string) => {');
   });

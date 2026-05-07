@@ -238,7 +238,7 @@ cta-strip:    { align?: left|center|right, heading?, subheading?, cta?, ctas? }
 cover:        { imageSrc, dimRatio, minHeight, heading?, subheading?, headingStyle?, subheadingStyle?, cta?, ctas?, contentAlign }
 post-list:    { title?, layout: list|grid-2|grid-3, showDate, showAuthor, showCategory, showExcerpt, showFeaturedImage, itemLayout?: title-meta-inline|stacked, metaLayout?: inline|stacked, metaAlign?: start|end, metaSeparator?: none|dot|dash|slash|pipe, itemGap?, metaGap? }
 card-grid:    { title?, titleStyle?, subtitle?, columns: 2|3|4, columnWidths?, cardStyle?, cards: [{heading,body}] }
-media-text:   { imageSrc, imageAlt, imagePosition: left|right, imageRadius?, imageAspectRatio?, columnWidths?, heading?, body?, headingStyle?, bodyStyle?, listItems?, cta?, ctas? }
+media-text:   { imageSrc, imageAlt, imagePosition: left|right, imageRadius?, imageAspectRatio?, columnWidths?, heading?, body?, headingStyle?, bodyStyle?, listItems?, stats?: [{ value, label }], cta?, ctas? }
 testimonial:  { quote, authorName, authorTitle?, authorAvatar?, contentAlign?, quoteStyle?, authorStyle?, cardStyle? }
 newsletter:   { heading, headingStyle?, subheading?, buttonText, layout: centered|card, inputStyle?, cardStyle? }
 footer:       { brandDescription?, menuColumns: [{title,menuSlug}], copyright? }
@@ -1408,6 +1408,51 @@ function validateSectionDetailed(
       if (typeof raw.imageAlt !== 'string') raw.imageAlt = '';
       if (!['left', 'right'].includes(raw.imagePosition))
         raw.imagePosition = 'left';
+      if (typeof raw.imageFrameBorderStyle !== 'string') {
+        delete raw.imageFrameBorderStyle;
+      }
+      if (Array.isArray(raw.stats)) {
+        raw.stats = raw.stats
+          .map((entry: unknown) => {
+            if (!entry || typeof entry !== 'object') return null;
+            const stat = entry as Record<string, unknown>;
+            if (
+              typeof stat.value !== 'string' ||
+              typeof stat.label !== 'string' ||
+              !stat.value.trim() ||
+              !stat.label.trim()
+            ) {
+              return null;
+            }
+            const next: Record<string, unknown> = {
+              value: stat.value.trim(),
+              label: stat.label.trim(),
+            };
+            const valueStyle = sanitizeTypographyStyle(stat.valueStyle);
+            if (valueStyle) next.valueStyle = valueStyle;
+            const labelStyle = sanitizeTypographyStyle(stat.labelStyle);
+            if (labelStyle) next.labelStyle = labelStyle;
+            if (Array.isArray(stat.customClassNames)) {
+              const classes = [
+                ...new Set(
+                  stat.customClassNames
+                    .filter(
+                      (value: unknown): value is string =>
+                        typeof value === 'string',
+                    )
+                    .map((value) => value.trim())
+                    .filter(Boolean),
+                ),
+              ];
+              if (classes.length) next.customClassNames = classes;
+            }
+            return next;
+          })
+          .filter(Boolean);
+        if (raw.stats.length === 0) delete raw.stats;
+      } else {
+        delete raw.stats;
+      }
       break;
 
     case 'testimonial':
@@ -2568,6 +2613,8 @@ function sanitizeCardStyle(
     'shadow',
     'imageRadius',
     'imageAspectRatio',
+    'imageWidthStyle',
+    'imageHeightStyle',
   ] as const;
   for (const key of strFields) {
     if (typeof raw[key] === 'string' && (raw[key] as string).trim()) {

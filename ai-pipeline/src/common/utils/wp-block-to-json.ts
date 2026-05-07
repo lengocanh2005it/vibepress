@@ -26,6 +26,8 @@ export interface WpNode {
   bgColor?: string; // slug or hex — from params.backgroundColor or params.style.color.background
   textColor?: string; // slug or hex — from params.textColor or params.style.color.text
   borderRadius?: string; // from params.style.border.radius
+  borderWidth?: string; // from params.style.border.width
+  borderColor?: string; // from params.borderColor or params.style.border.color
   gap?: string; // from params.style.spacing.blockGap or params.gap — normalized CSS gap value
   padding?: { top?: string; right?: string; bottom?: string; left?: string }; // from params.style.spacing.padding
   margin?: { top?: string; right?: string; bottom?: string; left?: string }; // from params.style.spacing.margin
@@ -137,6 +139,9 @@ const BASE_USEFUL_PARAM_KEYS = new Set([
   'contentPosition', // cover block content position
   'isStackedOnMobile', // columns stacking behaviour
   'overlayMenu', // navigation overlay mode
+  'overlayBackgroundColor', // navigation responsive overlay background color slug
+  'overlayTextColor', // navigation responsive overlay text color slug
+  'icon', // navigation responsive button icon intent, e.g. "menu"
   'isResponsive', // navigation responsive collapse behaviour
   'openSubmenusOnClick', // navigation interaction hint
   'verticalAlignment', // column vertical align
@@ -307,6 +312,19 @@ function normalizeCssLength(value: unknown): string | undefined {
     : dedupedUnits;
 }
 
+function parseCssNumericDimension(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (value === undefined || value === null) return undefined;
+  const normalized = String(value).trim();
+  if (!normalized || /^(auto|inherit|initial|unset)$/i.test(normalized)) {
+    return undefined;
+  }
+  const match = normalized.match(/^(-?\d+(?:\.\d+)?)(?:px)?$/i);
+  if (!match) return undefined;
+  const parsed = Number(match[1]);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 function normalizeBorderRadius(value: unknown): string | undefined {
   if (!value) return undefined;
   if (typeof value === 'string' || typeof value === 'number') {
@@ -340,6 +358,23 @@ function normalizeBorderRadius(value: unknown): string | undefined {
     return `${topLeft} ${topRight} ${bottomRight}`;
   }
   return `${topLeft} ${topRight} ${bottomRight} ${bottomLeft}`;
+}
+
+function normalizeColorHint(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  const normalized = String(value).trim();
+  if (!normalized) return undefined;
+  if (
+    /^#/.test(normalized) ||
+    /^(rgb|rgba|hsl|hsla|oklch|lab|lch|color|var)\(/i.test(normalized) ||
+    /^(transparent|currentcolor|inherit|initial|unset)$/i.test(normalized)
+  ) {
+    return normalized;
+  }
+  if (/^[a-z0-9_-]+$/i.test(normalized)) {
+    return `var(--wp--preset--color--${normalized})`;
+  }
+  return undefined;
 }
 
 function normalizeHorizontalAlign(
@@ -708,6 +743,12 @@ function parseBlocks(markup: string): WpNode[] {
     // Lift border radius from params.style.border.radius
     const borderRadius = normalizeBorderRadius(params?.style?.border?.radius);
     if (borderRadius) node.borderRadius = borderRadius;
+    const borderWidth = normalizeCssLength(params?.style?.border?.width);
+    if (borderWidth) node.borderWidth = borderWidth;
+    const borderColor = normalizeColorHint(
+      params?.style?.border?.color ?? params?.borderColor,
+    );
+    if (borderColor) node.borderColor = borderColor;
     // Lift gap from params.style.spacing.blockGap or params.gap
     const gap = normalizeGapValue(
       params?.style?.spacing?.blockGap ?? params?.gap,
@@ -788,6 +829,12 @@ function liftBlockParamHints(
 
   const borderRadius = normalizeBorderRadius(params.style?.border?.radius);
   if (borderRadius) node.borderRadius = borderRadius;
+  const borderWidth = normalizeCssLength(params.style?.border?.width);
+  if (borderWidth) node.borderWidth = borderWidth;
+  const borderColor = normalizeColorHint(
+    params.style?.border?.color ?? params.borderColor,
+  );
+  if (borderColor) node.borderColor = borderColor;
 
   const gap = normalizeGapValue(params.style?.spacing?.blockGap ?? params.gap);
   if (gap) node.gap = gap;
@@ -1006,8 +1053,10 @@ function buildNode(
 
   // For wp:image — add dimensions from params if not already in img tag
   if (blockName === 'image') {
-    if (!leaf.width && params?.width) leaf.width = params.width as number;
-    if (!leaf.height && params?.height) leaf.height = params.height as number;
+    const width = parseCssNumericDimension(params?.width);
+    const height = parseCssNumericDimension(params?.height);
+    if (!leaf.width && width !== undefined) leaf.width = width;
+    if (!leaf.height && height !== undefined) leaf.height = height;
   }
   if (blockName === 'site-logo' && !leaf.width && params?.width) {
     leaf.width = Number(params.width);
@@ -1035,6 +1084,7 @@ function buildNode(
  */
 function extractLeafContent(blockName: string, html: string): Partial<WpNode> {
   const customClassNames = extractUsefulCustomClassNamesFromHtml(html);
+  const htmlWithoutComments = html.replace(/<!--[\s\S]*?-->/g, '');
   const stripped = html
     .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/\s+class="[^"]*"/g, '')
@@ -1054,25 +1104,38 @@ function extractLeafContent(blockName: string, html: string): Partial<WpNode> {
   }
 
   // Image
-  const imgMatch = stripped.match(/<img([^>]*)>/i);
+  const imgMatch =
+    htmlWithoutComments.match(/<img([^>]*)>/i) ??
+    stripped.match(/<img([^>]*)>/i);
   if (imgMatch) {
     const attrs = imgMatch[1];
     const src = attrs.match(/src="([^"]+)"/)?.[1] ?? '';
     const alt = attrs.match(/alt="([^"]*)"/)?.[1] ?? '';
-    const width = attrs.match(/width="([^"]+)"/)?.[1];
-    const height = attrs.match(/height="([^"]+)"/)?.[1];
+    const style = attrs.match(/style="([^"]+)"/)?.[1] ?? '';
+    const width =
+      attrs.match(/width="([^"]+)"/)?.[1] ??
+      style.match(/(?:^|;)\s*width\s*:\s*([^;]+)/i)?.[1];
+    const height =
+      attrs.match(/height="([^"]+)"/)?.[1] ??
+      style.match(/(?:^|;)\s*height\s*:\s*([^;]+)/i)?.[1];
+    const numericWidth = parseCssNumericDimension(width);
+    const numericHeight = parseCssNumericDimension(height);
     return {
       src: canonicalizeThemeAssetReference(src) ?? src,
       alt,
       ...(customClassNames.length ? { customClassNames } : {}),
-      ...(width ? { width: parseInt(width) } : {}),
-      ...(height ? { height: parseInt(height) } : {}),
+      ...(numericWidth !== undefined ? { width: numericWidth } : {}),
+      ...(numericHeight !== undefined ? { height: numericHeight } : {}),
     };
   }
 
-  // Button / link
+  // Button / standalone link. Paragraphs with inline links must keep their full
+  // rich text instead of being collapsed to only the anchor text.
   const aMatch = stripped.match(/<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
-  if (aMatch) {
+  const isStandaloneLinkBlock =
+    /^(core\/)?(button|navigation-link|social-link)$/i.test(blockName) ||
+    /^<a\b[^>]*>[\s\S]*<\/a>$/i.test(stripped);
+  if (aMatch && isStandaloneLinkBlock) {
     return {
       href: canonicalizeThemeAssetReference(aMatch[1]) ?? aMatch[1],
       text: stripTags(aMatch[2]),
@@ -1085,18 +1148,11 @@ function extractLeafContent(blockName: string, html: string): Partial<WpNode> {
   if (textContent.length > 0) {
     // For content-heavy blocks keep raw HTML so downstream rich-text renderers can
     // preserve the original paragraph/link/inline markup structure.
-    if (
-      blockName === 'post-content' ||
-      blockName === 'query' ||
-      textContent.length > 200
-    ) {
-      return { html: stripped };
-    }
-    // For list items, preserve inline HTML (e.g. <strong>, <em>, <a>) so the
-    // structured rich-text renderer can keep bold/italic/link formatting intact.
     const hasInlineHtml = /<(strong|em|b|i|a|code|mark|s|u|span)[^>]*>/i.test(
       stripped,
     );
+    // For list items, preserve inline HTML (e.g. <strong>, <em>, <a>) so the
+    // structured rich-text renderer can keep bold/italic/link formatting intact.
     if (
       (blockName === 'core/list-item' || blockName === 'list-item') &&
       hasInlineHtml
@@ -1106,6 +1162,14 @@ function extractLeafContent(blockName: string, html: string): Partial<WpNode> {
         html: stripped,
         ...(customClassNames.length ? { customClassNames } : {}),
       };
+    }
+    if (
+      blockName === 'post-content' ||
+      blockName === 'query' ||
+      textContent.length > 200 ||
+      hasInlineHtml
+    ) {
+      return { html: stripped };
     }
     return {
       text: textContent,

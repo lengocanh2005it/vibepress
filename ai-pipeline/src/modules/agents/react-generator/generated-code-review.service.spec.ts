@@ -132,4 +132,99 @@ describe('GeneratedCodeReviewService', () => {
       },
     ]);
   });
+
+  it('treats raw theme-asset background review findings as blocking', async () => {
+    const chat = jest.fn(async () => ({
+      text: JSON.stringify({
+        pass: false,
+        issues: [
+          {
+            severity: 'high',
+            message:
+              'Project card cover backgrounds use the raw `theme-asset:/assets/images/projects-1.jpg` string in `backgroundImage` instead of resolving it to a real asset URL. This will prevent the approved project images from rendering.',
+          },
+        ],
+        summary: 'Raw theme asset URL.',
+      }),
+      inputTokens: 10,
+      outputTokens: 5,
+    }));
+    const service = new GeneratedCodeReviewService({
+      getModel: jest.fn(() => 'gpt-test'),
+      chat,
+    } as never);
+
+    const result = await service.review({
+      components: [
+        {
+          name: 'FrontPageProjects',
+          filePath: '',
+          type: 'partial',
+          isSubComponent: true,
+          generationMode: 'ai',
+          code: `export default function FrontPageProjects() { return <div />; }`,
+        },
+      ] as GeneratedComponent[],
+      plan: [] as never,
+      modelName: 'gpt-test',
+      mode: 'blocking',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.failures[0]?.componentName).toBe('FrontPageProjects');
+  });
+
+  it('treats source-backed readiness gates and layout redesign findings as blocking', async () => {
+    const chat = jest.fn(async () => ({
+      text: JSON.stringify({
+        pass: false,
+        issues: [
+          {
+            severity: 'high',
+            message:
+              'Component adds unnecessary client-only state/useEffect gating (`isReady`) and returns `null` on first render.',
+          },
+          {
+            severity: 'high',
+            message:
+              'Component materially redesigns the approved WordPress layout by introducing custom project card presentation.',
+          },
+          {
+            severity: 'high',
+            message:
+              'Approved hierarchy includes an actual nested image element inside the cover, but the generated component replaces this with CSS `backgroundImage`.',
+          },
+        ],
+        summary: 'Source-backed section was redesigned.',
+      }),
+      inputTokens: 10,
+      outputTokens: 5,
+    }));
+    const service = new GeneratedCodeReviewService({
+      getModel: jest.fn(() => 'gpt-test'),
+      chat,
+    } as never);
+
+    const result = await service.review({
+      components: [
+        {
+          name: 'FrontPageProjects',
+          filePath: '',
+          type: 'partial',
+          isSubComponent: true,
+          generationMode: 'ai',
+          code: `export default function FrontPageProjects() { return null; }`,
+        },
+      ] as GeneratedComponent[],
+      plan: [] as never,
+      modelName: 'gpt-test',
+      mode: 'blocking',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.failures[0]?.componentName).toBe('FrontPageProjects');
+    expect(result.failures[0]?.message).toContain(
+      'unnecessary client-only state/useEffect gating',
+    );
+  });
 });

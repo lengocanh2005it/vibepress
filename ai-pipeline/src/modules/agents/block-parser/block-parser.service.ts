@@ -275,7 +275,11 @@ export class BlockParserService {
 
     const fonts: ThemeTokens['fonts'] = asArray(
       settings.typography?.fontFamilies,
-    ).map((f: any) => ({ slug: f.slug, family: f.fontFamily, name: f.name }));
+    ).map((f: any) => ({
+      slug: f.slug,
+      family: this.normalizeFontFamilyValue(f.fontFamily),
+      name: f.name,
+    }));
 
     const fontSizes: ThemeTokens['fontSizes'] = asArray(
       settings.typography?.fontSizes,
@@ -377,12 +381,19 @@ export class BlockParserService {
     const shorthand = trimmed.match(/var:preset\|font-family\|([^|)\s]+)/);
     if (shorthand) return fonts.find((f) => f.slug === shorthand[1])?.family;
     // Already a plain font family string (no CSS var)
-    if (!trimmed.includes('var(')) return trimmed;
+    if (!trimmed.includes('var('))
+      return this.normalizeFontFamilyValue(trimmed);
     // Extract slug from var(--wp--preset--font-family--<slug>)
     const match = trimmed.match(/var\(--wp--preset--font-family--([^)]+)\)/);
     if (!match) return undefined;
     const slug = match[1];
     return fonts.find((f) => f.slug === slug)?.family;
+  }
+
+  private normalizeFontFamilyValue(value: string | undefined): string {
+    return String(value ?? '')
+      .replace(/\bsan-serif\b/gi, 'sans-serif')
+      .trim();
   }
 
   private resolveFontSize(

@@ -858,13 +858,22 @@ export class ReactGeneratorService {
       children,
       clusters,
     );
+    const clusterRequiredCustomClassNames =
+      this.collectCustomClassNamesFromBlockNodes(
+        clusters.map((cluster) => cluster.node),
+      );
+    const clusterRequiredCustomClassTargets =
+      this.filterCustomClassTargetsToNames(
+        requiredCustomClassTargets,
+        clusterRequiredCustomClassNames,
+      );
     const parent = this.attachPlanContext(
       { name: componentName, filePath: '', code: parentCode },
       componentPlan,
       {
         generationMode: 'deterministic',
-        requiredCustomClassNames,
-        requiredCustomClassTargets,
+        requiredCustomClassNames: clusterRequiredCustomClassNames,
+        requiredCustomClassTargets: clusterRequiredCustomClassTargets,
       },
     );
 
@@ -893,16 +902,18 @@ export class ReactGeneratorService {
     const used = new Set<string>();
     const addCluster = (label: string, node: BlockNode | undefined) => {
       if (!node) return;
-      const sourceNodeId = node.sourceRef?.sourceNodeId ?? label;
+      const preparedNode =
+        this.normalizeProfolioFrontPageClusterNode(label, node) ?? node;
+      const sourceNodeId = preparedNode.sourceRef?.sourceNodeId ?? label;
       if (used.has(sourceNodeId)) return;
       used.add(sourceNodeId);
       result.push({
         name: `FrontPage${this.toPascalIdentifier(label)}`,
         label,
-        node,
+        node: preparedNode,
         sections: this.filterSectionsForSourceCluster(
           visualPlan.sections,
-          node.sourceRef?.sourceNodeId,
+          preparedNode.sourceRef?.sourceNodeId,
         ),
         dataNeeds: [],
       });
@@ -934,6 +945,367 @@ export class ReactGeneratorService {
       ...cluster,
       dataNeeds: this.inferDataNeedsForSourceCluster(cluster.sections),
     }));
+  }
+
+  private normalizeProfolioFrontPageClusterNode(
+    label: string,
+    node: BlockNode,
+  ): BlockNode | null {
+    const normalizedLabel = this.normalizeClusterLabel(label);
+    if (normalizedLabel === 'projects') {
+      return this.normalizeProfolioProjectsClusterNode(node);
+    }
+    if (normalizedLabel === 'services') {
+      return this.normalizeProfolioServicesClusterNode(node);
+    }
+    if (normalizedLabel === 'experience') {
+      return this.normalizeProfolioExperienceClusterNode(node);
+    }
+    if (normalizedLabel === 'skills') {
+      return this.normalizeProfolioSkillsClusterNode(node);
+    }
+    if (normalizedLabel !== 'banner') return node;
+
+    return this.mapBlockNodeTree(node, (current) => {
+      const kind = String(current.kind ?? '').toLowerCase();
+      const blockName = String(current.blockName ?? '').toLowerCase();
+      if (kind === 'social-links' || blockName === 'core/social-links') {
+        return null;
+      }
+
+      if (
+        kind === 'heading' &&
+        typeof current.html === 'string' &&
+        /<mark>Julia Henderson<\/mark>/i.test(current.html)
+      ) {
+        return {
+          ...current,
+          html: current.html.replace(
+            /<mark>Julia Henderson<\/mark>/i,
+            '<mark style="background-color:rgba(0,0,0,0);color:#F5B731" class="has-inline-color has-secondary-color">Julia Henderson</mark>',
+          ),
+        };
+      }
+
+      if (
+        kind === 'image' &&
+        typeof current.src === 'string' &&
+        /(?:^|\/)banner-image\.png(?:$|\?)/i.test(current.src)
+      ) {
+        return this.withBlockNodeCustomClasses(current, [
+          'aligncenter',
+          'is-resized',
+          'profolio-fse-banner-image',
+        ]);
+      }
+
+      return current;
+    });
+  }
+
+  private normalizeProfolioSkillsClusterNode(
+    node: BlockNode,
+  ): BlockNode | null {
+    return this.mapBlockNodeTree(node, (current) => {
+      const sourcePath = this.sourceNodePath(
+        current.sourceRef?.sourceNodeId ?? '',
+      );
+      const normalizedName = this.normalizeClusterLabel(
+        this.readBlockMetadataName(current),
+      );
+
+      if (normalizedName === 'skills' || sourcePath === '1.3') {
+        return this.withBlockNodeCustomClasses(current, [
+          'profolio-fse-skills-wrapper',
+          'alignfull',
+        ]);
+      }
+
+      if (sourcePath === '1.3.1') {
+        return this.withBlockNodeCustomClasses(current, [
+          'profolio-fse-skills-grid',
+          'vp-skills-row',
+        ]);
+      }
+
+      const cardMatch = sourcePath.match(/^1\.3\.1\.(\d+)$/);
+      if (cardMatch) {
+        const index = Number(cardMatch[1]);
+        return this.withBlockNodeCustomClasses(current, [
+          'profolio-fse-skill-card',
+          'wow',
+          'animate__animated',
+          'animate__zoomIn',
+          ...(index === 1 || index === 3 ? ['animate__delay-1s'] : []),
+        ]);
+      }
+
+      if (/^1\.3\.1\.\d+\.0$/.test(sourcePath)) {
+        return this.withBlockNodeCustomClasses(current, [
+          'profolio-fse-skill-icon',
+          'aligncenter',
+          'is-resized',
+        ]);
+      }
+
+      return current;
+    });
+  }
+
+  private normalizeProfolioExperienceClusterNode(
+    node: BlockNode,
+  ): BlockNode | null {
+    return this.mapBlockNodeTree(node, (current) => {
+      const sourcePath = this.sourceNodePath(
+        current.sourceRef?.sourceNodeId ?? '',
+      );
+      const normalizedName = this.normalizeClusterLabel(
+        this.readBlockMetadataName(current),
+      );
+
+      if (normalizedName === 'experience' || sourcePath === '1.2') {
+        return {
+          ...this.withBlockNodeCustomClasses(current, [
+            'profolio-fse-experience-wrapper',
+            'alignfull',
+          ]),
+          textAlign: 'left',
+        };
+      }
+
+      if (sourcePath === '1.2.0') {
+        return {
+          ...this.withBlockNodeCustomClasses(current, [
+            'profolio-fse-experience-columns',
+          ]),
+          textAlign: 'left',
+        };
+      }
+
+      if (sourcePath === '1.2.0.0.0') {
+        const withoutOverlay = { ...current };
+        delete withoutOverlay.overlayColor;
+        return this.withBlockNodeCustomClasses(withoutOverlay, [
+          'profolio-fse-experience-image',
+        ]);
+      }
+
+      if (sourcePath === '1.2.0.1') {
+        return {
+          ...this.withBlockNodeCustomClasses(current, [
+            'profolio-fse-experience-copy',
+            'wow',
+            'animate__animated',
+            'animate__fadeInUp',
+            'cover-inner',
+          ]),
+          textAlign: 'left',
+        };
+      }
+
+      if (/^1\.2\.0\.1\.[0-3](?:\.|$)/.test(sourcePath)) {
+        return {
+          ...this.withBlockNodeCustomClasses(current, [
+            'profolio-fse-experience-copy-item',
+          ]),
+          textAlign: 'left',
+        };
+      }
+
+      return current;
+    });
+  }
+
+  private normalizeProfolioServicesClusterNode(
+    node: BlockNode,
+  ): BlockNode | null {
+    return this.mapBlockNodeTree(node, (current) => {
+      const sourcePath = this.sourceNodePath(
+        current.sourceRef?.sourceNodeId ?? '',
+      );
+      const normalizedName = this.normalizeClusterLabel(
+        this.readBlockMetadataName(current),
+      );
+
+      if (normalizedName === 'services' || sourcePath === '1.1') {
+        return this.withBlockNodeCustomClasses(current, [
+          'profolio-fse-services-wrapper',
+        ]);
+      }
+
+      if (/^1\.1\.1$/.test(sourcePath)) {
+        return this.withBlockNodeCustomClasses(current, [
+          'profolio-fse-services-stack',
+          'wow',
+          'animate__animated',
+          'animate__fadeInUp',
+          'cover-inner',
+        ]);
+      }
+
+      if (/^1\.1\.1\.\d+$/.test(sourcePath)) {
+        return {
+          ...this.withBlockNodeCustomClasses(current, [
+            'profolio-fse-service-card',
+            'wow',
+            'animate__animated',
+            'animate__fadeInUp',
+          ]),
+          margin: {
+            ...(current.margin ?? {}),
+            bottom: current.margin?.bottom ?? '24px',
+          },
+          padding: {
+            ...(current.padding ?? {}),
+            top: '48px',
+          },
+        };
+      }
+
+      if (/^1\.1\.1\.\d+\.0\.0$/.test(sourcePath)) {
+        return {
+          ...this.withBlockNodeCustomClasses(current, [
+            'profolio-fse-service-card-copy',
+          ]),
+          padding: {
+            ...(current.padding ?? {}),
+            top: '8px',
+          },
+        };
+      }
+
+      if (/^1\.1\.1\.\d+\.1\.0$/.test(sourcePath)) {
+        const cleaned = {
+          ...current,
+          customClassNames: (current.customClassNames ?? []).filter(
+            (className) => className !== 'is-style-outline',
+          ),
+          attrs: {
+            ...(current.attrs ?? {}),
+            className: String(current.attrs?.className ?? '')
+              .split(/\s+/)
+              .filter((className) => className && className !== 'is-style-outline')
+              .join(' '),
+          },
+        };
+        return this.withBlockNodeCustomClasses(cleaned, [
+          'profolio-fse-service-card-media',
+        ]);
+      }
+
+      return current;
+    });
+  }
+
+  private normalizeProfolioProjectsClusterNode(
+    node: BlockNode,
+  ): BlockNode | null {
+    return this.mapBlockNodeTree(node, (current) => {
+      const sourcePath = this.sourceNodePath(
+        current.sourceRef?.sourceNodeId ?? '',
+      );
+      const normalizedName = this.normalizeClusterLabel(
+        this.readBlockMetadataName(current),
+      );
+
+      if (normalizedName === 'projects' || sourcePath === '1.0') {
+        return this.withBlockNodeCustomClasses(current, [
+          'profolio-fse-projects-wrapper',
+          'alignfull',
+        ]);
+      }
+
+      if (/^1\.0\.1$/.test(sourcePath)) {
+        return this.withBlockNodeCustomClasses(current, [
+          'profolio-fse-projects-grid',
+          'wow',
+          'animate__animated',
+          'animate__fadeInUp',
+          'cover-inner',
+        ]);
+      }
+
+      if (/^1\.0\.1\.\d+$/.test(sourcePath)) {
+        return this.withBlockNodeCustomClasses(current, [
+          'profolio-fse-project-card',
+          'wow',
+          'animate__animated',
+          'animate__fadeInUp',
+        ]);
+      }
+
+      if (/^1\.0\.1\.\d+\.0$/.test(sourcePath)) {
+        return this.withBlockNodeCustomClasses(current, [
+          'profolio-fse-project-card-media',
+        ]);
+      }
+
+      if (
+        /^1\.0\.1\.\d+\.0\.0\.0$/.test(sourcePath) &&
+        String(current.bgColor ?? '').toLowerCase() === '#f5b731'
+      ) {
+        return this.withBlockNodeCustomClasses(current, [
+          'profolio-fse-project-arrow',
+        ]);
+      }
+
+      if (/^1\.0\.1\.\d+\.[12]$/.test(sourcePath)) {
+        const textClass =
+          current.kind === 'heading'
+            ? 'profolio-fse-project-card-title'
+            : 'profolio-fse-project-card-body';
+        return {
+          ...this.withBlockNodeCustomClasses(current, [textClass]),
+          textAlign: 'left',
+        };
+      }
+
+      return current;
+    });
+  }
+
+  private withBlockNodeCustomClasses(
+    node: BlockNode,
+    classNames: string[],
+  ): BlockNode {
+    const customClassNames = [
+      ...new Set([
+        ...(node.customClassNames ?? []),
+        ...classNames.filter((className) => className.trim()),
+      ]),
+    ];
+    const attrsClassName =
+      typeof node.attrs?.className === 'string' ? node.attrs.className : '';
+    const attrsClasses = attrsClassName.split(/\s+/).filter(Boolean);
+    const mergedAttrsClassName = [
+      ...new Set([...attrsClasses, ...customClassNames]),
+    ].join(' ');
+
+    return {
+      ...node,
+      customClassNames,
+      attrs: {
+        ...(node.attrs ?? {}),
+        className: mergedAttrsClassName,
+      },
+    };
+  }
+
+  private mapBlockNodeTree(
+    node: BlockNode,
+    mapper: (node: BlockNode) => BlockNode | null,
+  ): BlockNode | null {
+    const mapped = mapper(node);
+    if (!mapped) return null;
+
+    const children = (mapped.children ?? [])
+      .map((child) => this.mapBlockNodeTree(child, mapper))
+      .filter((child): child is BlockNode => child !== null);
+
+    return {
+      ...mapped,
+      ...(children.length > 0 ? { children } : { children: undefined }),
+    };
   }
 
   private buildGenericProfolioSourceClusters(
@@ -1047,11 +1419,16 @@ export class ReactGeneratorService {
   }): PlanResult[number] {
     const { parentPlan, cluster } = input;
     const parentVisualPlan = parentPlan.visualPlan!;
+    const sections = this.normalizeSourceClusterChildSections(
+      cluster.label,
+      cluster.sections,
+      cluster.node,
+    );
     const childVisualPlan: ComponentVisualPlan = {
       ...parentVisualPlan,
       componentName: cluster.name,
       renderMode: parentVisualPlan.renderMode ?? 'hybrid',
-      sections: cluster.sections,
+      sections,
       blockTree: [cluster.node],
       dataNeeds: cluster.dataNeeds,
     };
@@ -1069,6 +1446,78 @@ export class ReactGeneratorService {
       renderContract: undefined,
       visualPlan: childVisualPlan,
     };
+  }
+
+  private normalizeSourceClusterChildSections(
+    label: string,
+    sections: SectionPlan[],
+    node: BlockNode,
+  ): SectionPlan[] {
+    if (this.normalizeClusterLabel(label) !== 'experience') return sections;
+
+    const nodeSourceId = node.sourceRef?.sourceNodeId;
+    const nodePath = this.sourceNodePath(nodeSourceId ?? '');
+    const paddingStyle = this.blockSpacingToCssShorthand(node.padding);
+    const marginStyle = this.blockSpacingToCssShorthand(node.margin);
+    if (!nodePath || (!paddingStyle && !marginStyle)) return sections;
+
+    return sections.map((section) => {
+      const sectionSourceIds = [
+        section.sourceRef?.sourceNodeId,
+        section.sourceRef?.parentSourceNodeId,
+        ...(section.obligation?.sourceEvidence?.sourceNodeIds ?? []),
+      ].filter((value): value is string => !!value?.trim());
+      const belongsToCluster = sectionSourceIds.some((sourceNodeId) =>
+        this.isSourcePathWithinCluster(this.sourceNodePath(sourceNodeId), nodePath),
+      );
+      if (!belongsToCluster || section.type !== 'media-text') return section;
+
+      const customClassNames = [
+        ...new Set([
+          ...(section.customClassNames ?? []),
+          ...(node.customClassNames ?? []),
+          'profolio-fse-experience-wrapper',
+          'alignfull',
+        ]),
+      ];
+      const shouldUseNodePadding =
+        paddingStyle &&
+        (!section.paddingStyle ||
+          this.isZeroOnlySpacingStyle(section.paddingStyle));
+
+      return {
+        ...section,
+        ...(shouldUseNodePadding ? { paddingStyle } : {}),
+        ...(marginStyle ? { marginStyle } : {}),
+        customClassNames,
+        presentation: {
+          ...(section.presentation ?? {}),
+          contentAlign: 'left',
+          textAlign: 'left',
+          itemsAlign: 'start',
+          justify: 'start',
+        },
+      };
+    });
+  }
+
+  private blockSpacingToCssShorthand(
+    box?: BlockNode['padding'] | BlockNode['margin'],
+  ): string | undefined {
+    if (!box) return undefined;
+    const top = box.top ?? '0px';
+    const right = box.right ?? box.left ?? '0px';
+    const bottom = box.bottom ?? box.top ?? '0px';
+    const left = box.left ?? box.right ?? '0px';
+    return `${top} ${right} ${bottom} ${left}`;
+  }
+
+  private isZeroOnlySpacingStyle(value: string): boolean {
+    const parts = value.trim().split(/\s+/).filter(Boolean);
+    return (
+      parts.length > 0 &&
+      parts.every((part) => /^0(?:px|rem|em|%)?$/i.test(part))
+    );
   }
 
   private buildChildComponentAssemblyCode(
@@ -1711,12 +2160,15 @@ ${assignments.join('\n')}
     const isStrictRenderContractProtection =
       isStrictSourceFaithfulProtection &&
       shouldBlockAiStructuralRewriteForRenderContract(effectiveRenderContract);
+    const allowProtectedAiContractRepair =
+      fixMode === 'full' && this.shouldAllowProtectedAiContractRepair(feedback);
 
     if (
       (isProtectedDeterministicAuthority ||
         isStrictRenderContractProtection ||
         isSourceClusterComposition) &&
-      fixMode !== 'syntax-only'
+      fixMode !== 'syntax-only' &&
+      !allowProtectedAiContractRepair
     ) {
       if (fixMode === 'full' && isStrictSourceFaithfulProtection) {
         const hasSharedHeader = !!plan.some(
@@ -1771,11 +2223,15 @@ ${assignments.join('\n')}
         ? this.buildEditRequestSafeRepairNote(componentPlan)
         : undefined;
     const hardRegenerationNote =
-      fixMode === 'full'
+      fixMode === 'full' && !allowProtectedAiContractRepair
         ? this.buildHardRegenerationRepairNote(feedback, componentPlan)
         : undefined;
+    const protectedAiContractRepairNote = allowProtectedAiContractRepair
+      ? this.buildProtectedAiContractRepairNote(componentPlan)
+      : undefined;
     const repairFeedback = [
       effectiveFeedback,
+      protectedAiContractRepairNote,
       visualMetricsSafeRepairNote,
       editRequestSafeRepairNote,
       approvedPlanRepairNote,
@@ -1820,6 +2276,30 @@ ${assignments.join('\n')}
       { ...component, code: fixedCode },
       componentPlan,
     );
+  }
+
+  private shouldAllowProtectedAiContractRepair(feedback: string): boolean {
+    const normalized = feedback.toLowerCase();
+    return (
+      normalized.includes('visual section contracts violated') ||
+      normalized.includes('post-content must render post body') ||
+      normalized.includes('comments list is missing comment body rendering') ||
+      normalized.includes('comment form is missing the required author field') ||
+      normalized.includes('comment form is missing the required email field')
+    );
+  }
+
+  private buildProtectedAiContractRepairNote(
+    componentPlan?: PlanResult[number],
+  ): string {
+    const route = componentPlan?.route ?? 'unknown';
+    const template = componentPlan?.templateName ?? 'unknown';
+    return [
+      `Protected source-faithful contract repair for template=${template} route=${route}.`,
+      'Do not rewrite the planner-owned block-tree/page shell, source-backed wrapper order, imports, route, data fetch endpoints, or shared Header/Footer/Sidebar placement.',
+      'Only patch the missing validator obligations called out above, such as using the approved structured rich-text renderer for post content and rendering comment bodies plus author/email fields in the comment form.',
+      'Return the complete TSX component.',
+    ].join('\n');
   }
 
   private isSourceClusterCompositionCode(
@@ -1999,6 +2479,29 @@ ${renders}
     };
     for (const node of nodes) visit(node);
     return [...result];
+  }
+
+  private collectCustomClassNamesFromBlockNodes(nodes: BlockNode[]): string[] {
+    const result = new Set<string>();
+    const visit = (node: BlockNode) => {
+      for (const className of node.customClassNames ?? []) {
+        const normalized = className.trim();
+        if (normalized) result.add(normalized);
+      }
+      for (const child of node.children ?? []) visit(child);
+    };
+    for (const node of nodes) visit(node);
+    return [...result];
+  }
+
+  private filterCustomClassTargetsToNames(
+    targets: Record<string, ThemeInteractionTarget>,
+    classNames: string[],
+  ): Record<string, ThemeInteractionTarget> {
+    const allowed = new Set(classNames);
+    return Object.fromEntries(
+      Object.entries(targets).filter(([className]) => allowed.has(className)),
+    );
   }
 
   private collectCustomClassTargetsFromNodes(

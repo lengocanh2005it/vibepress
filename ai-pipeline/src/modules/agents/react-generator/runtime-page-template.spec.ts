@@ -23,12 +23,19 @@ describe('RuntimePage template source', () => {
 
   it('keeps runtime metadata attributes for preview/edit routing', () => {
     expect(source).toContain('data-runtime-component="RuntimePage"');
-    expect(source).toContain('data-runtime-slug={page.slug}');
-    expect(source).toContain('data-runtime-source-kind={sourceKind}');
+    expect(source).toContain("'data-runtime-slug': page.slug");
+    expect(source).toContain("'data-runtime-source-kind': sourceKind");
   });
 
   it('keeps profolio-specific runtime page classes', () => {
     expect(source).toContain('runtime-page--theme-profolio-fse');
+  });
+
+  it('renders expanded profolio-fse templates directly instead of wrapping duplicate hero chrome', () => {
+    expect(source).toContain('const hasExpandedTemplate = Boolean(');
+    expect(source).toContain('if (isProfolioFse && hasExpandedTemplate)');
+    expect(source).not.toContain('className="wp-block-cover"');
+    expect(source).not.toContain('page.featuredImage');
   });
 
   it('renders runtime page HTML through rich-text nodes instead of escaping raw content', () => {
