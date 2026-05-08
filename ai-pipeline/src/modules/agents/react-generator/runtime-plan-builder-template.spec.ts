@@ -46,7 +46,9 @@ describe('runtime-plan-builder template source', () => {
     expect(source).toContain('readRuntimeThemeTokens');
     expect(source).toContain("join(themeDir, 'theme.json')");
     expect(source).toContain('blockStyles: styles.blocks');
-    expect(source).toContain('const themeTokens = readRuntimeThemeTokens(themeDir)');
+    expect(source).toContain(
+      'const themeTokens = readRuntimeThemeTokens(themeDir)',
+    );
     expect(source).toContain('themeTokens,');
   });
 

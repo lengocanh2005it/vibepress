@@ -2,7 +2,10 @@ import { readFileSync } from 'fs';
 import { resolve } from 'path';
 
 describe('runtime preview CSS source', () => {
-  const cssPath = resolve(process.cwd(), 'templates/react-preview/src/index.css');
+  const cssPath = resolve(
+    process.cwd(),
+    'templates/react-preview/src/index.css',
+  );
   const source = readFileSync(cssPath, 'utf-8');
 
   it('models profolio-fse root-padding-aware full-width runtime sections', () => {

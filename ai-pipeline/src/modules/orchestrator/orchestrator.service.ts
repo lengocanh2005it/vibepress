@@ -3344,6 +3344,8 @@ export default function ${component.name}() {
         }
         state.status = 'running';
         let approvedEditApplied = false;
+        let approvedEditMode: 'component-edit' | 'runtime-override' | null =
+          null;
 
         if (decision.action === 'apply') {
           const editOutcome = await this.runStep(
@@ -3363,6 +3365,86 @@ export default function ${component.name}() {
                     'The baseline visual compare has finished. The pipeline is now applying the approved user edit request to the React preview.',
                 }),
               );
+              const runtimeOverrideResult =
+                await this.tryApplyRuntimePageEditOverride({
+                  jobId,
+                  request: dto.editRequest,
+                  preview,
+                  modelName: resolvedModels.fixAgent,
+                  logPath,
+                });
+
+              if (runtimeOverrideResult.applied) {
+                const approvalControl = this.controls.get(jobId);
+                if (approvalControl) {
+                  approvalControl.pendingEditApproval = false;
+                  approvalControl.editApplied = true;
+                }
+                this.emitStepProgress(
+                  state,
+                  '8b_edit_request',
+                  0.94,
+                  `Runtime page override applied (${runtimeOverrideResult.patchCount} patch(es)); no frontend rebuild required.`,
+                  {
+                    ...this.buildPreviewEventData({
+                      preview,
+                      previewStage: 'edited',
+                      hasEditRequest,
+                      editApprovalRequired: false,
+                      editApplied: true,
+                      metrics: metrics ?? undefined,
+                    }),
+                    runtimeEditMode: 'runtime-override',
+                    runtimeEditRoute: runtimeOverrideResult.route,
+                    runtimeEditPatchCount: runtimeOverrideResult.patchCount,
+                    ...(this.buildEditRequestProgressData({
+                      request: dto.editRequest,
+                      title: 'Approved runtime edit has been applied',
+                      summary:
+                        'The approved edit was applied as a page-scoped runtime override. The assembled app was preserved and the running preview can render the override without rebuilding the frontend.',
+                    }) ?? {}),
+                  },
+                );
+                this.updateStateResult(state, {
+                  previewDir: preview.previewDir,
+                  frontendDir: preview.frontendDir,
+                  previewUrl: preview.previewUrl,
+                  apiBaseUrl: preview.apiBaseUrl,
+                  previewStage: 'edited',
+                  hasEditRequest,
+                  editApprovalRequired: false,
+                  editApplied: true,
+                  uiSourceMapPath: preview.uiSourceMapPath,
+                  routeEntries: preview.routeEntries,
+                  baselineMetrics,
+                  metrics,
+                });
+                this.rememberStepEventData(jobId, '8b_edit_request', {
+                  ...this.buildPreviewEventData({
+                    preview,
+                    previewStage: 'edited',
+                    hasEditRequest,
+                    editApprovalRequired: false,
+                    editApplied: true,
+                    metrics: metrics ?? undefined,
+                  }),
+                  runtimeEditMode: 'runtime-override',
+                  runtimeEditRoute: runtimeOverrideResult.route,
+                  runtimeEditPatchCount: runtimeOverrideResult.patchCount,
+                  ...(this.buildEditRequestProgressData({
+                    request: dto.editRequest,
+                    title: 'Approved runtime edit has been applied',
+                    summary:
+                      'The approved edit was applied as a page-scoped runtime override without changing generated TSX.',
+                  }) ?? {}),
+                });
+                return {
+                  applied: true,
+                  taskCount: runtimeOverrideResult.patchCount,
+                  mode: 'runtime-override' as const,
+                };
+              }
+
               const editPassResult = await this.applyPostMigrationEditPass({
                 jobId,
                 state,
@@ -3475,10 +3557,15 @@ export default function ${component.name}() {
                     'The approved edit request has been applied and synced into the live React preview.',
                 }) ?? {}),
               });
-              return { applied: true, taskCount: editPassResult.taskCount };
+              return {
+                applied: true,
+                taskCount: editPassResult.taskCount,
+                mode: 'component-edit' as const,
+              };
             },
           );
           approvedEditApplied = Boolean(editOutcome?.applied);
+          approvedEditMode = editOutcome?.mode ?? null;
         } else {
           const editStep = state.steps.find(
             (step) => step.name === '8b_edit_request',
@@ -3538,7 +3625,9 @@ export default function ${component.name}() {
                 state,
                 '9b_post_edit_visual_validation',
                 0.16,
-                'Capturing fresh compare artifacts for the edited preview and validating that the approved user request landed cleanly.',
+                approvedEditMode === 'runtime-override'
+                  ? 'Capturing fresh compare artifacts for the runtime-overridden preview; no TSX rebuild was required.'
+                  : 'Capturing fresh compare artifacts for the edited preview and validating that the approved user request landed cleanly.',
                 {
                   ...this.buildPreviewEventData({
                     preview,
@@ -3552,7 +3641,9 @@ export default function ${component.name}() {
                     request: dto.editRequest,
                     title: 'Validating the edited preview',
                     summary:
-                      'The approved edit is now live. This pass checks whether the requested change is visible and whether unrelated regressions were introduced.',
+                      approvedEditMode === 'runtime-override'
+                        ? 'The approved runtime override is now live. This pass checks the rendered route after the override file was written.'
+                        : 'The approved edit is now live. This pass checks whether the requested change is visible and whether unrelated regressions were introduced.',
                   }) ?? {}),
                 },
               );
@@ -3703,6 +3794,7 @@ export default function ${component.name}() {
                 for (
                   let round = 1;
                   round <= maxPostEditRepairRounds &&
+                  approvedEditMode !== 'runtime-override' &&
                   validation.shouldRepair &&
                   validation.confidence >= 0.55;
                   round++
@@ -7490,6 +7582,310 @@ export default function ${component.name}() {
         captures,
       },
     };
+  }
+
+  private async tryApplyRuntimePageEditOverride(input: {
+    jobId: string;
+    request?: RunPipelineDto['editRequest'];
+    preview: PreviewBuilderResult;
+    modelName?: string;
+    logPath: string;
+  }): Promise<{
+    applied: boolean;
+    route?: string;
+    patchCount: number;
+  }> {
+    const { request, preview, modelName, logPath } = input;
+    const route = this.resolveRuntimeEditRoute(request);
+    if (
+      !request ||
+      !route ||
+      !this.isRuntimeOverrideSupportedTarget(request, route)
+    ) {
+      return { applied: false, patchCount: 0 };
+    }
+
+    const sourceNodeId = request.targetHint?.sourceNodeId?.trim();
+    const patches = await this.planRuntimePageEditPatches({
+      request,
+      route,
+      sourceNodeId,
+      modelName,
+      logPath,
+    });
+    const validPatches = patches.filter((patch) =>
+      this.isValidRuntimePageEditPatch(patch),
+    );
+    if (validPatches.length === 0) {
+      await this.logToFile(
+        logPath,
+        `[Runtime Edit Override] No valid page-scoped patches were produced for route=${route}. Falling back to component edit flow.`,
+      );
+      return { applied: false, route, patchCount: 0 };
+    }
+
+    const overridePath = join(
+      preview.previewDir,
+      'server',
+      'runtime',
+      'page-edit-overrides.json',
+    );
+    await mkdir(join(preview.previewDir, 'server', 'runtime'), {
+      recursive: true,
+    });
+    const existing = await this.readRuntimePageEditOverrides(overridePath);
+    existing[route] = [...(existing[route] ?? []), ...validPatches];
+    await writeFile(overridePath, JSON.stringify(existing, null, 2), 'utf-8');
+    await this.logToFile(
+      logPath,
+      `[Runtime Edit Override] Applied route=${route} patches=${validPatches.length} file=${overridePath}`,
+    );
+    return { applied: true, route, patchCount: validPatches.length };
+  }
+
+  private resolveRuntimeEditRoute(
+    request?: RunPipelineDto['editRequest'],
+  ): string | undefined {
+    const raw =
+      request?.targetHint?.route ||
+      request?.pageContext?.reactRoute ||
+      request?.pageContext?.wordpressRoute ||
+      request?.attachments?.[0]?.captureContext?.page?.route ||
+      undefined;
+    if (!raw) return undefined;
+    try {
+      const parsed = new URL(raw, 'http://local.test');
+      return parsed.pathname.replace(/\/+$/, '') || '/';
+    } catch {
+      return String(raw).trim().replace(/\/+$/, '') || '/';
+    }
+  }
+
+  private isRuntimeOverrideSupportedTarget(
+    request: NonNullable<RunPipelineDto['editRequest']>,
+    route: string,
+  ): boolean {
+    const componentName = request.targetHint?.componentName?.trim();
+    return (
+      route === '/' ||
+      route.startsWith('/page/') ||
+      componentName === 'RuntimePage' ||
+      componentName === 'FrontPage'
+    );
+  }
+
+  private async planRuntimePageEditPatches(input: {
+    request: NonNullable<RunPipelineDto['editRequest']>;
+    route: string;
+    sourceNodeId?: string;
+    modelName?: string;
+    logPath: string;
+  }): Promise<Array<Record<string, any>>> {
+    const { request, route, sourceNodeId, modelName, logPath } = input;
+    const fallbackPatch = this.buildHeuristicRuntimePageEditPatch({
+      request,
+      route,
+      sourceNodeId,
+    });
+    const assetCatalog = this.buildRuntimeEditAssetCatalog(request);
+    const systemPrompt = [
+      'You are a strict JSON patch planner for a WordPress-to-React runtime page renderer.',
+      'Return JSON only. Do not return TSX, Markdown, or prose.',
+      'Allowed ops: replace-text, update-colors, replace-image, insert-simple-section.',
+      'Use only the provided route, sourceNodeId, and asset catalog. Never invent remote image URLs.',
+      'For simple content changes, prefer replace-text. For background/text color changes, use update-colors.',
+      'For image changes, choose one asset from assetCatalog. For adding one simple section, use insert-simple-section.',
+    ].join('\n');
+    const userPrompt = [
+      `Route: ${route}`,
+      `Target sourceNodeId: ${sourceNodeId ?? '(none)'}`,
+      `Target text preview: ${request.targetHint?.targetTextPreview ?? '(none)'}`,
+      `User request: ${request.prompt || '(none)'}`,
+      `Asset catalog: ${JSON.stringify(assetCatalog)}`,
+      '',
+      'Return this shape:',
+      '{"patches":[{"op":"replace-text|update-colors|replace-image|insert-simple-section","target":{"sourceNodeId":"..."},"value":{}}]}',
+    ].join('\n');
+
+    try {
+      const result = await this.llmFactory.chat({
+        model: modelName ?? this.llmFactory.getModel(),
+        systemPrompt,
+        userPrompt,
+        maxTokens: 900,
+        temperature: 0.1,
+      });
+      const parsed = this.extractJsonObject(result.text);
+      const patches = Array.isArray(parsed?.patches) ? parsed.patches : [];
+      if (patches.length > 0) return patches;
+    } catch (error) {
+      await this.logToFile(
+        logPath,
+        `[Runtime Edit Override] AI patch planner failed, using heuristic fallback: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    return fallbackPatch ? [fallbackPatch] : [];
+  }
+
+  private buildHeuristicRuntimePageEditPatch(input: {
+    request: NonNullable<RunPipelineDto['editRequest']>;
+    route: string;
+    sourceNodeId?: string;
+  }): Record<string, any> | null {
+    const { request, sourceNodeId } = input;
+    const prompt = request.prompt?.trim() ?? '';
+    const lower = prompt.toLowerCase();
+    const wantsSection =
+      /\b(add|insert|new section|section)\b/i.test(prompt) ||
+      /thêm|chen|section|phần mới/i.test(prompt);
+    const wantsImage = /image|photo|picture|ảnh|hình/i.test(prompt);
+    const wantsColor = /color|colour|background|bg|màu|nền/i.test(prompt);
+    const target = sourceNodeId ? { sourceNodeId } : {};
+
+    if (wantsSection) {
+      return {
+        op: 'insert-simple-section',
+        target,
+        value: {
+          afterSourceNodeId: sourceNodeId,
+          heading: this.extractQuotedText(prompt) ?? 'New Section',
+          body: prompt,
+          backgroundImage: 'theme-asset:/assets/images/banner.jpg',
+          backgroundColor: '#111111',
+          textColor: '#ffffff',
+        },
+      };
+    }
+
+    if (wantsImage && sourceNodeId) {
+      const asset = this.buildRuntimeEditAssetCatalog(request)[0] ?? {
+        id: 'theme:banner',
+        src: 'theme-asset:/assets/images/banner.jpg',
+        alt: 'Portfolio banner',
+      };
+      return {
+        op: 'replace-image',
+        target,
+        value: {
+          assetId: asset.id,
+          src: asset.src,
+          alt: asset.alt ?? asset.title ?? 'Selected image',
+        },
+      };
+    }
+
+    if (wantsColor && sourceNodeId) {
+      const backgroundColor =
+        lower.includes('đen') || lower.includes('black')
+          ? '#111111'
+          : '#f5b731';
+      const color = backgroundColor === '#111111' ? '#ffffff' : '#111111';
+      return {
+        op: 'update-colors',
+        target,
+        value: { backgroundColor, color },
+      };
+    }
+
+    if (sourceNodeId && prompt) {
+      return {
+        op: 'replace-text',
+        target,
+        value: {
+          text: this.extractQuotedText(prompt) ?? prompt,
+        },
+      };
+    }
+
+    return null;
+  }
+
+  private buildRuntimeEditAssetCatalog(
+    request: NonNullable<RunPipelineDto['editRequest']>,
+  ): Array<Record<string, string | number | undefined>> {
+    const uploaded = Array.isArray(request.imageAssets)
+      ? request.imageAssets
+      : [];
+    return [
+      ...uploaded
+        .filter((asset) => typeof asset?.publicUrl === 'string')
+        .map((asset, index) => ({
+          id: `upload:${asset.providerAssetId ?? asset.fileName ?? index}`,
+          src: asset.publicUrl,
+          alt: asset.fileName,
+          title: asset.fileName,
+          width: asset.width,
+          height: asset.height,
+        })),
+      {
+        id: 'theme:banner',
+        src: 'theme-asset:/assets/images/banner.jpg',
+        alt: 'Dark portfolio banner',
+        title: 'Dark portfolio banner',
+      },
+      {
+        id: 'theme:banner-image',
+        src: 'theme-asset:/assets/images/banner-image.png',
+        alt: 'Portfolio profile image',
+        title: 'Portfolio profile image',
+      },
+    ];
+  }
+
+  private isValidRuntimePageEditPatch(patch: Record<string, any>): boolean {
+    const allowedOps = new Set([
+      'replace-text',
+      'update-colors',
+      'replace-image',
+      'insert-simple-section',
+    ]);
+    if (!patch || !allowedOps.has(String(patch.op))) return false;
+    if (patch.op !== 'insert-simple-section') {
+      const sourceNodeId = patch.target?.sourceNodeId;
+      if (typeof sourceNodeId !== 'string' || !sourceNodeId.trim()) {
+        return false;
+      }
+    }
+    if (patch.op === 'replace-image') {
+      const src = String(patch.value?.src ?? '');
+      return (
+        src.startsWith('theme-asset:/') ||
+        src.startsWith('/assets/') ||
+        /^https:\/\/res\.cloudinary\.com\//i.test(src) ||
+        /^https:\/\/ik\.imagekit\.io\//i.test(src)
+      );
+    }
+    return true;
+  }
+
+  private async readRuntimePageEditOverrides(
+    filePath: string,
+  ): Promise<Record<string, any[]>> {
+    try {
+      const raw = await readFile(filePath, 'utf-8');
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  private extractJsonObject(text: string): any {
+    const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
+    const raw = fenced ?? text;
+    const start = raw.indexOf('{');
+    const end = raw.lastIndexOf('}');
+    if (start === -1 || end === -1 || end <= start) return null;
+    return JSON.parse(raw.slice(start, end + 1));
+  }
+
+  private extractQuotedText(text: string): string | undefined {
+    const match =
+      text.match(/"([^"]{2,})"/) ??
+      text.match(/'([^']{2,})'/) ??
+      text.match(/“([^”]{2,})”/);
+    return match?.[1]?.trim() || undefined;
   }
 
   private async applyPostMigrationEditPass(input: {

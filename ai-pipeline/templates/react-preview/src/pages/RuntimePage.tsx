@@ -7,6 +7,7 @@ import type {
   RuntimeLayoutPolicy,
   RuntimePageRecord,
   RuntimePageResponse,
+  RuntimePagePatch,
   RuntimeStyleSpec,
 } from '../runtime/runtime-contract';
 
@@ -234,10 +235,20 @@ export default function RuntimePage({
   const runtimeContentBlockTree = Array.isArray(runtimePlan?.contentBlockTree)
     ? runtimePlan.contentBlockTree
     : [];
+  const runtimePatches = selectRuntimePagePatches(runtimePlan?.overrides, page.slug);
   const runtimeContentNodes = selectRuntimeContentNodes(
     runtimePlan.blockTree,
     isProfolioFse,
     hasExpandedTemplate,
+  );
+  const patchedRuntimeContentNodes = applyRuntimePagePatches(
+    runtimeContentNodes,
+    runtimePatches,
+    runtimeContentBlockTree.length === 0,
+  );
+  const patchedRuntimeContentBlockTree = applyRuntimePagePatches(
+    runtimeContentBlockTree,
+    runtimePatches,
   );
   const shouldRenderBlockTree =
     runtimeContentNodes.length > 0 && runtimePlan.mode !== 'page-content';
@@ -250,10 +261,10 @@ export default function RuntimePage({
         {...runtimePageDataProps}
       >
         {renderRuntimeNodes(
-          runtimeContentNodes,
+          patchedRuntimeContentNodes,
           page,
           `${page.slug}-runtime`,
-          runtimeContentBlockTree,
+          patchedRuntimeContentBlockTree,
         )}
       </div>
     );
@@ -306,6 +317,223 @@ function selectRuntimeContentNodes(
 function isProfolioContentRoot(node: RuntimeBlockNode): boolean {
   if (node.kind === 'cover') return true;
   return getExplicitRuntimeTag(node) === 'main';
+}
+
+function selectRuntimePagePatches(
+  overrides: RuntimePageResponse['runtimePlan']['overrides'] | undefined,
+  pageSlug: string,
+): RuntimePagePatch[] {
+  if (!overrides || overrides.pageSlug !== pageSlug) return [];
+  return Array.isArray(overrides.patches) ? overrides.patches : [];
+}
+
+function applyRuntimePagePatches(
+  nodes: RuntimeBlockNode[],
+  patches: RuntimePagePatch[],
+  allowAppendUnanchoredInsert = true,
+): RuntimeBlockNode[] {
+  if (!patches.length) return nodes;
+  const result: RuntimeBlockNode[] = [];
+  for (const node of nodes) {
+    const patched = applyRuntimePagePatchesToNode(node, patches);
+    if (!patched) continue;
+    result.push(patched);
+    for (const patch of patches) {
+      if (
+        patch.op === 'insert-simple-section' &&
+        getRuntimePatchAfterSourceNodeId(patch) === getRuntimeNodeSourceNodeId(node)
+      ) {
+        result.push(buildRuntimeInsertedSimpleSection(patch, `${patched.nodeId ?? 'runtime-node'}-inserted`));
+      }
+    }
+  }
+  for (const patch of patches) {
+    if (
+      allowAppendUnanchoredInsert &&
+      patch.op === 'insert-simple-section' &&
+      !getRuntimePatchAfterSourceNodeId(patch)
+    ) {
+      result.push(buildRuntimeInsertedSimpleSection(patch, 'runtime-inserted'));
+    }
+  }
+  return result;
+}
+
+function applyRuntimePagePatchesToNode(
+  node: RuntimeBlockNode,
+  patches: RuntimePagePatch[],
+): RuntimeBlockNode | null {
+  const sourceNodeId = getRuntimeNodeSourceNodeId(node);
+  const directPatches = patches.filter(
+    (patch) => patch.target?.sourceNodeId === sourceNodeId,
+  );
+  if (directPatches.some((patch) => patch.op === 'hide-node')) return null;
+
+  let next: RuntimeBlockNode = { ...node };
+  for (const patch of directPatches) {
+    next = applyRuntimePagePatchToNode(next, patch);
+  }
+
+  if (node.children?.length) {
+    next.children = applyRuntimePagePatches(node.children, patches, false);
+  }
+  return next;
+}
+
+function applyRuntimePagePatchToNode(
+  node: RuntimeBlockNode,
+  patch: RuntimePagePatch,
+): RuntimeBlockNode {
+  const value = patch.value ?? {};
+  if (patch.op === 'replace-text') {
+    const text = readRuntimePatchString(value.text);
+    const html = readRuntimePatchString(value.html);
+    if (!text && !html) return node;
+    return {
+      ...node,
+      ...(text ? { text } : {}),
+      ...(html ? { html } : { html: undefined }),
+    };
+  }
+  if (patch.op === 'update-colors' || patch.op === 'update-style') {
+    const color = readRuntimePatchString(value.color ?? value.textColor);
+    const backgroundColor = readRuntimePatchString(
+      value.backgroundColor ?? value.bgColor,
+    );
+    if (!color && !backgroundColor) return node;
+    return {
+      ...node,
+      ...(color ? { textColor: color } : {}),
+      ...(backgroundColor ? { bgColor: backgroundColor } : {}),
+      style: {
+        ...(node.style ?? {}),
+        colors: {
+          ...(node.style?.colors ?? {}),
+          ...(color ? { text: color } : {}),
+          ...(backgroundColor ? { background: backgroundColor } : {}),
+        },
+      },
+    };
+  }
+  if (patch.op === 'replace-image') {
+    const src = readRuntimePatchString(value.src);
+    const alt = readRuntimePatchString(value.alt);
+    if (!src) return node;
+    return {
+      ...node,
+      src,
+      ...(alt ? { alt } : {}),
+      media: {
+        ...(node.media ?? {}),
+        src,
+        ...(alt ? { alt } : {}),
+      },
+    };
+  }
+  return node;
+}
+
+function buildRuntimeInsertedSimpleSection(
+  patch: RuntimePagePatch,
+  keyPrefix: string,
+): RuntimeBlockNode {
+  const value = patch.value ?? {};
+  const heading = readRuntimePatchString(value.heading) || 'New Section';
+  const body = readRuntimePatchString(value.body);
+  const backgroundImage = readRuntimePatchString(value.backgroundImage ?? value.src);
+  const backgroundColor =
+    readRuntimePatchString(value.backgroundColor) || '#111111';
+  const textColor = readRuntimePatchString(value.textColor) || '#ffffff';
+  const nodeId = `${keyPrefix}-simple-section`;
+  return {
+    nodeId,
+    kind: backgroundImage ? 'cover' : 'group',
+    blockName: backgroundImage ? 'core/cover' : 'core/group',
+    sourceRef: { sourceNodeId: nodeId },
+    customClassNames: ['runtime-page__inserted-section', 'alignfull'],
+    layout: {
+      kind: 'constrained',
+      align: 'full',
+      widthPolicy: 'full-bleed',
+      innerWidthPolicy: 'content',
+    },
+    style: {
+      colors: {
+        background: backgroundColor,
+        text: textColor,
+      },
+      spacing: {
+        padding: {
+          top: '80px',
+          right: '20px',
+          bottom: '80px',
+          left: '20px',
+        },
+      },
+    },
+    ...(backgroundImage
+      ? {
+          src: backgroundImage,
+          alt: readRuntimePatchString(value.imageAlt) || '',
+          attrs: { dimRatio: 70 },
+          overlayColor: backgroundColor,
+        }
+      : {}),
+    children: [
+      {
+        nodeId: `${nodeId}.heading`,
+        kind: 'heading',
+        blockName: 'core/heading',
+        sourceRef: { sourceNodeId: `${nodeId}.heading` },
+        level: 2,
+        text: heading,
+        textAlign: 'center',
+        style: {
+          typography: {
+            textAlign: 'center',
+            fontSize: '2.5rem',
+            lineHeight: '1.15',
+          },
+        },
+      },
+      ...(body
+        ? [
+            {
+              nodeId: `${nodeId}.body`,
+              kind: 'paragraph',
+              blockName: 'core/paragraph',
+              sourceRef: { sourceNodeId: `${nodeId}.body` },
+              text: body,
+              textAlign: 'center',
+              style: {
+                typography: {
+                  textAlign: 'center',
+                  lineHeight: '1.7',
+                },
+              },
+            } as RuntimeBlockNode,
+          ]
+        : []),
+    ],
+  };
+}
+
+function getRuntimeNodeSourceNodeId(node: RuntimeBlockNode): string | undefined {
+  return node.sourceRef?.sourceNodeId ?? node.nodeId;
+}
+
+function getRuntimePatchAfterSourceNodeId(
+  patch: RuntimePagePatch,
+): string | undefined {
+  const value = patch.value ?? {};
+  return (
+    patch.target?.sourceNodeId ||
+    readRuntimePatchString(value.afterSourceNodeId)
+  );
+}
+
+function readRuntimePatchString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
 function renderRuntimeNodes(

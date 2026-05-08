@@ -233,6 +233,8 @@ export class GeneratedCodeReviewService {
         ? `- For source-bound child components:
   - dataNeeds describe props supplied by the parent page; do NOT accept direct \`fetch(...)\`, \`/api/*\`, or \`useParams()\` in the child.
   - Review the child against its approved visual sections and source block hierarchy. Missing source-backed headings, body copy, images, cards, or important wrapper classes are blocking issues.
+  - Text shown in "approved visual section details" or "approved source text snippets" is source-approved. Do NOT call those headings invented/unapproved.
+  - Static source-bound children must render immediately. Do NOT accept unnecessary mount-only \`useState/useEffect\` gates that return \`null\` or hide all content on first render.
   - Do NOT fail only because the child does not fetch data itself; it should render from props such as \`posts\`, \`products\`, \`pageDetail\`, \`postDetail\`, \`loading\`, and \`error\` when declared.`
         : `- For ordinary partial components, be much more lenient:
   - do NOT fail only because they fetch optional helper data
@@ -266,6 +268,7 @@ ${partialRules}
  - If the template/source clearly includes an important screenshot, product composite, UI mockup, or other full illustrative image, DO flag fixed-height \`object-cover\` cropping when it visibly cuts off meaningful content that should remain visible.
  - If a media-text/photo section in the approved/source layout clearly uses rounded image corners or strong heading/list emphasis, DO flag generated code that flattens those into sharp-corner images or weak muted regular-weight text.
 - Do NOT require exact text/copy matching unless the code is clearly unrelated.
+- Do NOT flag a heading/text as invented if it appears in the approved visual section details, approved block hierarchy, or approved source text snippets below.
 - Known app routes are authoritative. Do NOT flag a route/link as risky if it matches one of the known routes below.
 - Treat concrete links like \`/post/\${slug}\` or \`/category/\${slug}\` as valid when they correspond to approved patterns such as \`/post/:slug\` or \`/category/:slug\`.
 - If \`fixedSlug\` is present in the approved contract, this component is bound to one exact record. In that case, do flag any use of \`useParams()\`, \`/api/pages/\${slug}\`, or \`/api/posts/\${slug}\` for the main record fetch. The component should use the exact bound endpoint instead.
@@ -293,6 +296,8 @@ Approved contract:
 ${this.buildVisualSectionDetailLines(contract, visualPlan)}
 - approved block hierarchy:
 ${blockTreeSummary}
+- approved source text snippets:
+${this.buildBlockTreeTextSnippetLines(contract, visualPlan)}
 - known app routes:
 ${knownRoutes}
 - allowed API expectations:
@@ -495,6 +500,44 @@ ${component.code}
     visit(nodes);
     if (lines.length >= 12) lines.push('- ...');
     return lines.join('\n');
+  }
+
+  private buildBlockTreeTextSnippetLines(
+    contract: PlanResult[number] | null,
+    visualPlan?: ComponentVisualPlan,
+  ): string {
+    const nodes =
+      visualPlan?.blockTree ?? contract?.visualPlan?.blockTree ?? [];
+    const snippets: string[] = [];
+    const visit = (items: readonly BlockNode[]) => {
+      for (const node of items) {
+        if (snippets.length >= 16) return;
+        const snippet = this.readBlockNodeTextSnippet(node);
+        if (snippet && !snippets.includes(snippet)) snippets.push(snippet);
+        if (node.children?.length) visit(node.children);
+      }
+    };
+    visit(nodes);
+    return snippets.length > 0
+      ? snippets.map((snippet) => `- ${JSON.stringify(snippet)}`).join('\n')
+      : '- (none)';
+  }
+
+  private readBlockNodeTextSnippet(node: BlockNode): string | null {
+    const raw = [
+      (node as { text?: unknown }).text,
+      (node as { label?: unknown }).label,
+      (node as { html?: unknown }).html,
+    ].find((value) => typeof value === 'string' && value.trim());
+    if (typeof raw !== 'string') return null;
+    const normalized = raw
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!normalized || normalized.length > 120) return null;
+    return normalized;
   }
 
   private normalizeDataNeed(value: string): string {

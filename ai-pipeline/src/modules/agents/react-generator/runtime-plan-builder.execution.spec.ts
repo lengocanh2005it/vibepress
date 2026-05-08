@@ -163,8 +163,7 @@ describe('runtime-plan-builder execution', () => {
       ].join('\n'),
     });
 
-    const image =
-      plan.contentBlockTree[0].children?.[0].children?.[0];
+    const image = plan.contentBlockTree[0].children?.[0].children?.[0];
 
     expect(image?.kind).toBe('image');
     expect(image?.layoutContext).toMatchObject({

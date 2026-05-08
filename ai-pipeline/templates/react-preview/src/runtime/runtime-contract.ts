@@ -298,10 +298,12 @@ export interface RuntimePagePatch {
   op:
     | 'replace-text'
     | 'replace-image'
+    | 'update-colors'
     | 'update-style'
     | 'hide-node'
     | 'show-node'
-    | 'reorder-within-parent';
+    | 'reorder-within-parent'
+    | 'insert-simple-section';
   value: Record<string, unknown>;
 }
 

@@ -48,6 +48,7 @@ export class EditRequestService {
       request.attachments,
       pageContext,
     );
+    const imageAssets = this.normalizeImageAssets(request.imageAssets);
     const prompt = request.prompt?.trim() ?? '';
     const language = normalizeRequestedLanguage(
       request.language,
@@ -60,6 +61,7 @@ export class EditRequestService {
       language,
       pageContext,
       attachments,
+      imageAssets,
     };
   }
 
@@ -252,10 +254,35 @@ export class EditRequestService {
     });
   }
 
+  private normalizeImageAssets(
+    imageAssets?: PipelineClientEditRequestDto['imageAssets'],
+  ): PipelineEditRequestDto['imageAssets'] {
+    const normalized = (imageAssets ?? [])
+      .filter(
+        (asset) =>
+          (asset?.provider === 'cloudinary' ||
+            asset?.provider === 'imagekit') &&
+          typeof asset.publicUrl === 'string' &&
+          asset.publicUrl.trim() &&
+          typeof asset.fileName === 'string' &&
+          asset.fileName.trim(),
+      )
+      .map((asset) => ({
+        ...asset,
+        fileName: asset.fileName.trim(),
+        publicUrl: asset.publicUrl.trim(),
+        mimeType: asset.mimeType?.trim() || undefined,
+        providerAssetId: asset.providerAssetId?.trim() || undefined,
+      }));
+
+    return normalized.length > 0 ? normalized : undefined;
+  }
+
   private isMeaningfulRequest(request: PipelineEditRequestDto): boolean {
     return Boolean(
       request.prompt ||
       request.attachments?.length ||
+      request.imageAssets?.length ||
       request.targetHint ||
       request.constraints,
     );

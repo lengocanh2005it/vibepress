@@ -116,7 +116,7 @@ describe('RuntimePage template source', () => {
   });
 
   it('keeps Gutenberg column layouts horizontal on desktop while allowing mobile stacking', () => {
-    expect(source).toContain("style.flexWrap =");
+    expect(source).toContain('style.flexWrap =');
     expect(source).toContain("?? 'nowrap'");
     expect(source).toContain('style.flex = `0 1 ${width}`');
     expect(source).toContain("style.flex = '1 1 0'");
@@ -132,9 +132,7 @@ describe('RuntimePage template source', () => {
   });
 
   it('applies runtime theme tokens as WordPress CSS variables', () => {
-    expect(source).toContain(
-      'buildRuntimeThemeStyle(',
-    );
+    expect(source).toContain('buildRuntimeThemeStyle(');
     expect(source).toContain('function buildRuntimeThemeStyle(');
     expect(source).toContain('runtimePlan?.layoutPolicy');
     expect(source).toContain('--wp--style--global--content-size');

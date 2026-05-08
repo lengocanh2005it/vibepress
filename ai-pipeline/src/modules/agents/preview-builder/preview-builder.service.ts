@@ -488,12 +488,19 @@ export class PreviewBuilderService {
     await writeFile(
       join(srcDir, 'App.tsx'),
       `import { Routes, Route } from 'react-router-dom';
+import { PageEditOverrideApplier } from './runtime/page-edit-overrides';
 ${layoutImport}
 ${routeImports}
 
 export default function App() {
   return (
-${routesBlock}
+    <>
+      <PageEditOverrideApplier />
+${routesBlock
+  .split('\n')
+  .map((line) => `      ${line}`)
+  .join('\n')}
+    </>
   );
 }
 `,

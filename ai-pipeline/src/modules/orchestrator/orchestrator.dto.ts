@@ -223,6 +223,7 @@ export interface PipelineEditRequestDto {
   language?: string;
   pageContext?: PipelineEditPageContextDto;
   attachments?: PipelineCaptureAttachmentDto[];
+  imageAssets?: PipelineClientImageAssetDto[];
   targetHint?: PipelineEditTargetHintDto;
   constraints?: PipelineEditConstraintsDto;
 }
