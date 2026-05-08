@@ -109,7 +109,7 @@ export const RUNTIME_PAGE_SOURCE_INTERFACE = `interface RuntimePageSource { kind
 export const RUNTIME_PAGE_SUPPORT_INTERFACE = `interface RuntimePageSupport { safeForRuntime: boolean; unsupportedBlocks: string[]; }`;
 export const RUNTIME_PAGE_SUBTREE_BINDING_INTERFACE = `interface RuntimePageSubtreeBinding { nodeId: string; blockName: string; renderer: string; preserveWrapper: boolean; preserveChildrenOrder: boolean; childCount?: number; sectionId?: string; sectionDebugKey?: string; }`;
 export const RUNTIME_PAGE_SECTION_INTERFACE = `interface RuntimePageSection { id?: string; type: string; debugKey?: string; sectionKey?: string; sourceNodeId?: string; blockName?: string; title?: string; subtitle?: string; body?: string; imageSrc?: string; imageAlt?: string; columns?: number; cards?: Array<Record<string, unknown>>; items?: Array<Record<string, unknown>>; slides?: Array<Record<string, unknown>>; tabs?: Array<Record<string, unknown>>; layout?: Record<string, unknown>; style?: Record<string, unknown>; children?: RuntimePageSection[]; }`;
-export const RUNTIME_PAGE_PLAN_INTERFACE = `interface RuntimePagePlan { version: 1 | 2; mode: 'block-centric' | 'hybrid' | 'page-content'; fidelity: 'strict-structure' | 'best-effort'; layoutFamily?: string; themeTokens?: Record<string, unknown>; source: RuntimePageSource; support: RuntimePageSupport; dataNeeds: string[]; sections: RuntimePageSection[]; blockTree: Array<Record<string, unknown>>; contentBlockTree?: Array<Record<string, unknown>>; subtreeBindings?: RuntimePageSubtreeBinding[]; overrides?: Record<string, unknown>; }`;
+export const RUNTIME_PAGE_PLAN_INTERFACE = `interface RuntimePagePlan { version: 1 | 2; mode: 'block-centric' | 'hybrid' | 'page-content'; fidelity: 'strict-structure' | 'best-effort'; layoutFamily?: string; themeTokens?: Record<string, unknown>; layoutPolicy?: Record<string, unknown>; source: RuntimePageSource; support: RuntimePageSupport; dataNeeds: string[]; sections: RuntimePageSection[]; blockTree: Array<Record<string, unknown>>; contentBlockTree?: Array<Record<string, unknown>>; contentSlot?: Record<string, unknown>; subtreeBindings?: RuntimePageSubtreeBinding[]; overrides?: Record<string, unknown>; }`;
 export const RUNTIME_PAGE_RESPONSE_INTERFACE = `interface RuntimePageResponse { page: Page; runtimePlan: RuntimePagePlan; }`;
 
 function formatFieldList(fields: readonly string[]): string {
@@ -187,7 +187,9 @@ Use this only when the planner/generator explicitly opts into the runtime-render
 ### Contract intent
 - \`runtimePlan.blockTree\` is the template structural source of truth for wrapper order, nesting, columns, content slots, and section placement.
 - \`runtimePlan.contentBlockTree\` is the DB-backed Gutenberg body content tree that should be injected at \`post-content\` / \`page-content\` slots when present.
+- \`runtimePlan.contentSlot\` identifies the exact template node where DB content is mounted, including wrapper/layout/style metadata.
 - \`runtimePlan.themeTokens\` carries theme.json layout, color, spacing, typography, and block style tokens for deterministic runtime rendering.
+- Runtime block nodes may include \`dom\`, \`media\`, and resolved \`layout.widthPolicy\` metadata so the renderer does not infer core Gutenberg layout from prose alone.
 - \`runtimePlan.sections\` is an overlay for behavior/data-rich regions such as tabs, accordion, carousel, card-grid, modal, and prose clusters.
 - \`runtimePlan.subtreeBindings[].sectionDebugKey\` links a structural subtree to a semantic section overlay when hybrid rendering is required.
 - \`runtimePlan.support.safeForRuntime = false\` means the page should stay on a dedicated per-page component path instead of generic runtime rendering.

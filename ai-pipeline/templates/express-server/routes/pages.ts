@@ -7,6 +7,11 @@ export function registerPageRoutes(input: {
   serializePage: (conn: any, prefix: string, row: any) => Promise<any>;
   serializeRuntimePage?: (conn: any, prefix: string, row: any) => Promise<any>;
   buildRuntimePlanFromPageRow: (row: any) => Record<string, any>;
+  applyRuntimePageOverrides?: (
+    plan: Record<string, any>,
+    row: any,
+    route: string,
+  ) => Record<string, any>;
 }) {
   const {
     app,
@@ -15,6 +20,7 @@ export function registerPageRoutes(input: {
     serializePage,
     serializeRuntimePage,
     buildRuntimePlanFromPageRow,
+    applyRuntimePageOverrides,
   } = input;
 
   const buildPageSelectSql = (prefix: string, whereClause: string) => `SELECT p.ID, p.post_title, p.post_content, p.post_name, p.post_parent, p.menu_order,
@@ -54,9 +60,13 @@ export function registerPageRoutes(input: {
       );
       if (!rows.length) return res.status(404).json({ error: 'Not found' });
       const row = rows[0];
+      const route = `/page/${row.post_name}`;
+      const runtimePlan = buildRuntimePlanFromPageRow(row);
       res.json({
         page: await (serializeRuntimePage ?? serializePage)(conn, prefix, row),
-        runtimePlan: buildRuntimePlanFromPageRow(row),
+        runtimePlan: applyRuntimePageOverrides
+          ? applyRuntimePageOverrides(runtimePlan, row, route)
+          : runtimePlan,
       });
     } finally {
       await conn.end();

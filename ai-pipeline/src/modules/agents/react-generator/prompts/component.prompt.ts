@@ -678,13 +678,22 @@ function dataNeedsToPropNames(dataNeeds: string[]): string[] {
 
 function buildSubcomponentPropsNote(dataNeeds: string[]): string {
   const props = dataNeedsToPropNames(dataNeeds);
-  if (props.length === 0) return '';
-  return [
+  const lines = [
     '## Child component data flow',
     'This file is a child component. The parent page owns all fetching and route params.',
-    `Declare props for the runtime data you need: ${[...props, 'loading', 'error'].join(', ')}.`,
-    'Use those props directly in JSX. Do NOT call `fetch`, `useEffect` for API loading, `useState` for API data, or `useParams` inside this child.',
-  ].join('\n');
+    'Render static/source-backed content immediately. Do NOT add mount-only `useState/useEffect` gates, `isMounted`, `isClient`, `isReady`, or `return null` on first render unless this child has a real interactive state requirement.',
+  ];
+  if (props.length > 0) {
+    lines.push(
+      `Declare props for the runtime data you need: ${[...props, 'loading', 'error'].join(', ')}.`,
+      'Use those props directly in JSX. Do NOT call `fetch`, `useEffect` for API loading, `useState` for API data, or `useParams` inside this child.',
+    );
+  } else {
+    lines.push(
+      'This child has no data needs. Do NOT import `useState` or `useEffect` only to delay rendering, animate mounting, or guard browser/client readiness.',
+    );
+  }
+  return lines.join('\n');
 }
 
 function buildScopedApiContractNote(input: {
@@ -3280,6 +3289,7 @@ This is **section ${input.sectionIndex + 1} of ${input.totalSections}** of the \
 ⛔ DO NOT duplicate page-level layout (no full-page wrapper, no navigation bar, no footer).
 ⛔ DO NOT call \`fetch\`, \`useParams\`, or any \`/api/*\` endpoint inside this section component.
 This generated file is a child/presentational component. Render the source-backed block content from the template source below. If runtime data is truly needed, expose optional props and let the parent page own fetching and route params.
+⛔ DO NOT add mount-only \`useState/useEffect\`, \`isMounted\`, \`isClient\`, \`isReady\`, or \`return null\` on initial render for static source-backed sections.
 Render ONLY the JSX for the blocks in the template source below.`;
   const sourceTrackingNote = buildSourceTrackingNoteForNodes(
     input.nodesJson,

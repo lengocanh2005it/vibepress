@@ -489,6 +489,169 @@ function extractRuntimeBlockGap(
   return x || y ? { ...(x ? { x } : {}), ...(y ? { y } : {}) } : undefined;
 }
 
+function toRuntimeStylePropertyName(property: string): string {
+  return property
+    .trim()
+    .replace(/^-ms-/, 'ms-')
+    .replace(/-([a-z])/g, (_, char: string) => char.toUpperCase());
+}
+
+function parseRuntimeInlineStyle(raw: string | null | undefined): Record<string, string> | undefined {
+  if (!raw) return undefined;
+  const result: Record<string, string> = {};
+  for (const declaration of String(raw).split(';')) {
+    const [property, ...valueParts] = declaration.split(':');
+    const value = valueParts.join(':').trim();
+    const name = toRuntimeStylePropertyName(property ?? '');
+    if (name && value) result[name] = value;
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+function extractRuntimeFirstElement(block: RuntimeParsedBlock): {
+  tagName?: string;
+  attrsText?: string;
+} {
+  const match = /<([a-z0-9-]+)\b([^>]*)>/i.exec(block.innerHtml);
+  if (!match) return {};
+  return {
+    tagName: match[1]?.toLowerCase(),
+    attrsText: match[2] ?? '',
+  };
+}
+
+function extractRuntimeHtmlAttr(attrsText: string | undefined, attr: string): string | undefined {
+  if (!attrsText) return undefined;
+  const pattern = new RegExp(`\\b${attr}=([\"'])(.*?)\\1`, 'i');
+  const match = pattern.exec(attrsText);
+  return match?.[2]?.trim() || undefined;
+}
+
+function extractRuntimeDomSpec(
+  block: RuntimeParsedBlock,
+  classNames: string[],
+  wrapperTag?: string,
+): Record<string, any> | undefined {
+  const firstElement = extractRuntimeFirstElement(block);
+  const inlineStyle = parseRuntimeInlineStyle(
+    extractRuntimeHtmlAttr(firstElement.attrsText, 'style'),
+  );
+  const domId =
+    (typeof block.attrs?.anchor === 'string' && block.attrs.anchor.trim()) ||
+    extractRuntimeHtmlAttr(firstElement.attrsText, 'id');
+  const tagName =
+    (typeof block.attrs?.tagName === 'string' && block.attrs.tagName.trim()) ||
+    firstElement.tagName ||
+    wrapperTag;
+  const result: Record<string, any> = {
+    ...(tagName ? { tagName } : {}),
+    ...(domId ? { domId } : {}),
+    ...(classNames.length ? { classNames } : {}),
+    ...(inlineStyle ? { style: inlineStyle } : {}),
+  };
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+function deriveRuntimeWidthPolicy(
+  block: RuntimeParsedBlock,
+  layoutSpec: Record<string, any> | undefined,
+  classNames: string[],
+): Record<string, string> {
+  const align =
+    layoutSpec?.align ||
+    (typeof block.attrs?.align === 'string' ? block.attrs.align.trim() : '');
+  const hasAlignFull = align === 'full' || classNames.includes('alignfull');
+  const hasAlignWide = align === 'wide' || classNames.includes('alignwide');
+  const isConstrained = layoutSpec?.kind === 'constrained';
+
+  if (hasAlignFull) {
+    return {
+      widthPolicy: 'full-bleed',
+      ...(isConstrained ? { innerWidthPolicy: 'content' } : {}),
+    };
+  }
+  if (hasAlignWide) {
+    return {
+      widthPolicy: 'wide',
+      ...(isConstrained ? { innerWidthPolicy: 'content' } : {}),
+    };
+  }
+  if (isConstrained) {
+    return {
+      widthPolicy: 'content',
+      innerWidthPolicy: 'content',
+    };
+  }
+  if (block.blockName === 'core/image' || block.blockName === 'core/site-logo') {
+    return { widthPolicy: 'intrinsic' };
+  }
+  return {};
+}
+
+function readRuntimeNumericAttr(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return value;
+  }
+  const parsed = parseInt(String(value ?? ''), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function extractRuntimeMediaSpec(
+  block: RuntimeParsedBlock,
+  src: string | undefined,
+  alt: string | undefined,
+): Record<string, any> | undefined {
+  if (!src && !['core/image', 'core/cover', 'core/media-text', 'core/site-logo'].includes(block.blockName)) {
+    return undefined;
+  }
+  const html = rewriteRuntimeHtml(block.innerHtml);
+  const width =
+    readRuntimeNumericAttr(block.attrs?.width) ??
+    readRuntimeNumericAttr(extractFirstMatch(html, /\bwidth=(["'])([^"']+)\1/i, 2));
+  const height =
+    readRuntimeNumericAttr(block.attrs?.height) ??
+    readRuntimeNumericAttr(extractFirstMatch(html, /\bheight=(["'])([^"']+)\1/i, 2));
+  const id =
+    readRuntimeNumericAttr(block.attrs?.id) ??
+    readRuntimeNumericAttr(block.attrs?.mediaId);
+  const sizeSlug =
+    typeof block.attrs?.sizeSlug === 'string' && block.attrs.sizeSlug.trim()
+      ? block.attrs.sizeSlug.trim()
+      : undefined;
+  const aspectRatio =
+    typeof block.attrs?.aspectRatio === 'string' && block.attrs.aspectRatio.trim()
+      ? block.attrs.aspectRatio.trim()
+      : undefined;
+  const scale =
+    typeof block.attrs?.scale === 'string' && block.attrs.scale.trim()
+      ? block.attrs.scale.trim()
+      : undefined;
+  const focalPoint = block.attrs?.focalPoint;
+  const objectPosition =
+    focalPoint && typeof focalPoint === 'object'
+      ? (() => {
+          const fp = focalPoint as Record<string, unknown>;
+          const x = typeof fp.x === 'number' ? fp.x : parseFloat(String(fp.x ?? ''));
+          const y = typeof fp.y === 'number' ? fp.y : parseFloat(String(fp.y ?? ''));
+          return !isNaN(x) && !isNaN(y)
+            ? `${Math.round(x * 100)}% ${Math.round(y * 100)}%`
+            : undefined;
+        })()
+      : undefined;
+  const result = {
+    ...(src ? { src: localizeWpUploadAssetUrl(src) ?? src } : {}),
+    ...(alt ? { alt } : {}),
+    ...(id ? { id } : {}),
+    ...(width ? { width } : {}),
+    ...(height ? { height } : {}),
+    ...(sizeSlug ? { sizeSlug } : {}),
+    ...(aspectRatio ? { aspectRatio } : {}),
+    ...(scale ? { scale } : {}),
+    ...(objectPosition ? { objectPosition } : {}),
+  };
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
 function buildRuntimeStyleSpec(block: RuntimeParsedBlock, classNames: string[]) {
   const spacing = block.attrs?.style?.spacing;
   const typography = block.attrs?.style?.typography;
@@ -630,6 +793,7 @@ function buildRuntimeStyleSpec(block: RuntimeParsedBlock, classNames: string[]) 
 function buildRuntimeLayoutSpec(block: RuntimeParsedBlock) {
   const layout = block.attrs?.layout;
   const result: Record<string, any> = {};
+  const classNames = extractRuntimeClassNames(block.attrs, block.innerHtml);
   if (layout && typeof layout === 'object') {
     if (typeof layout.type === 'string' && layout.type.trim()) {
       result.kind = layout.type.trim();
@@ -708,6 +872,7 @@ function buildRuntimeLayoutSpec(block: RuntimeParsedBlock) {
       breakpoint: 780,
     };
   }
+  Object.assign(result, deriveRuntimeWidthPolicy(block, result, classNames));
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
@@ -756,12 +921,24 @@ function buildRuntimeBlockNode(
               ? 'section'
           : undefined;
   const image = extractRuntimeImageData(block);
+  const rawSrc =
+    image.src ||
+    ((typeof block.attrs.url === 'string' && block.attrs.url.trim()) ||
+      extractFirstMatch(innerHtml, /\bsrc=(["'])([^"']+)\1/i, 2));
+  const rawAlt =
+    image.alt ||
+    ((typeof block.attrs.alt === 'string' && block.attrs.alt.trim()) ||
+      extractFirstMatch(innerHtml, /\balt=(["'])([^"']*)\1/i, 2));
+  const domSpec = extractRuntimeDomSpec(block, classNames, wrapperTag);
+  const mediaSpec = extractRuntimeMediaSpec(block, rawSrc, rawAlt);
   const node: Record<string, any> = {
     nodeId: path,
     kind,
     blockName: block.blockName,
     sourceRef: { sourceNodeId: path },
     ...(attrs ? { attrs } : {}),
+    ...(domSpec ? { dom: domSpec } : {}),
+    ...(mediaSpec ? { media: mediaSpec } : {}),
     ...(styleSpec ? { style: styleSpec } : {}),
     ...(layoutSpec ? { layout: layoutSpec } : {}),
     ...(Object.keys(layoutContext).length > 0
@@ -810,14 +987,8 @@ function buildRuntimeBlockNode(
   const headingLevel =
     Number(block.attrs.level ?? 0) ||
     Number(extractFirstMatch(innerHtml, /<h([1-6])\b/i));
-  const src =
-    image.src ||
-    ((typeof block.attrs.url === 'string' && block.attrs.url.trim()) ||
-      extractFirstMatch(innerHtml, /\bsrc=(["'])([^"']+)\1/i, 2));
-  const alt =
-    image.alt ||
-    ((typeof block.attrs.alt === 'string' && block.attrs.alt.trim()) ||
-      extractFirstMatch(innerHtml, /\balt=(["'])([^"']*)\1/i, 2));
+  const src = rawSrc;
+  const alt = rawAlt;
   const href =
     (typeof block.attrs.url === 'string' && block.attrs.url.trim()) ||
     extractFirstMatch(innerHtml, /\bhref=(["'])([^"']+)\1/i, 2);
@@ -894,12 +1065,10 @@ function buildRuntimeBlockNode(
   }
 
   if (['core/image', 'core/site-logo'].includes(block.blockName)) {
-    const w = typeof block.attrs.width === 'number' ? block.attrs.width
-      : parseInt(String(block.attrs.width ?? ''), 10);
-    const h = typeof block.attrs.height === 'number' ? block.attrs.height
-      : parseInt(String(block.attrs.height ?? ''), 10);
-    if (!isNaN(w) && w > 0) node.width = w;
-    if (!isNaN(h) && h > 0) node.height = h;
+    const w = readRuntimeNumericAttr(block.attrs.width) ?? mediaSpec?.width;
+    const h = readRuntimeNumericAttr(block.attrs.height) ?? mediaSpec?.height;
+    if (w) node.width = w;
+    if (h) node.height = h;
   }
 
   if (['core/table', 'core/verse', 'core/html', 'core/preformatted', 'core/code'].includes(block.blockName)) {
@@ -961,6 +1130,30 @@ function buildRuntimeChildLayoutContext(
   return Object.fromEntries(
     Object.entries(context).filter(([, value]) => value !== undefined),
   );
+}
+
+function findRuntimeContentSlot(
+  nodes: Array<Record<string, any>>,
+): Record<string, any> | undefined {
+  for (const node of nodes) {
+    if (node?.binding?.kind === 'content-slot') {
+      return {
+        nodeId: node.nodeId,
+        blockName: node.blockName,
+        bindingSource: node.binding.source ?? 'page.content',
+        ...(node.wrapper ? { wrapper: node.wrapper } : {}),
+        ...(node.dom ? { dom: node.dom } : {}),
+        ...(node.layout ? { layout: node.layout } : {}),
+        ...(node.style ? { style: node.style } : {}),
+        ...(node.layoutContext ? { layoutContext: node.layoutContext } : {}),
+      };
+    }
+    const found = Array.isArray(node.children)
+      ? findRuntimeContentSlot(node.children)
+      : undefined;
+    if (found) return found;
+  }
+  return undefined;
 }
 
 function collectRuntimeSectionsAndBindings(
@@ -1498,6 +1691,7 @@ export function buildRuntimePlanFromPageRow(row: any) {
   const contentBlockTree = contentBlocks.map((block, index) =>
     buildRuntimeBlockNode(block, `content.${index + 1}`),
   );
+  const contentSlot = findRuntimeContentSlot(blockTree);
   const runtimeSignals = collectRuntimeSectionsAndBindings(blocks, {
     preserveSourceStructuralBlocks: shouldPreserveSourceStructuralBlocks(
       row,
@@ -1538,6 +1732,7 @@ export function buildRuntimePlanFromPageRow(row: any) {
     sections: runtimeSignals.sections,
     blockTree,
     contentBlockTree,
+    ...(contentSlot ? { contentSlot } : {}),
     subtreeBindings: runtimeSignals.bindings,
   };
 }

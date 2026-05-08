@@ -16,6 +16,9 @@ export interface ProgressEventData {
   hasEditRequest?: boolean;
   editApprovalRequired?: boolean;
   editApplied?: boolean;
+  runtimeEditMode?: 'runtime-override';
+  runtimeEditRoute?: string;
+  runtimeEditPatchCount?: number;
   stepDetails?: ProgressStepDetails;
   metrics?: SiteCompareMetrics;
 }

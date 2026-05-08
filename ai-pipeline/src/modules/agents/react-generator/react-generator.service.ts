@@ -2957,6 +2957,30 @@ ${renders}
       }
     }
 
+    const sourceLiterals = [
+      ...(surfacePlan ? collectSurfacePlanRequiredLiterals(surfacePlan) : []),
+      ...this.collectBlockNodeTextSnippets(
+        componentPlan.visualPlan?.blockTree ?? [],
+      ),
+    ].filter((value, index, array) => array.indexOf(value) === index);
+    if (sourceLiterals.length > 0) {
+      lines.push(
+        `- sourceApprovedLiterals=${sourceLiterals
+          .slice(0, 12)
+          .map((literal) => JSON.stringify(literal))
+          .join(' | ')}`,
+      );
+      lines.push(
+        '- Do NOT remove or call these literals invented/unapproved when they are part of this component/child visual plan.',
+      );
+    }
+
+    if (componentPlan.type === 'partial') {
+      lines.push(
+        '- Static/source-bound partials must render immediately. Do NOT add mount-only `useState/useEffect`, `isMounted`, `isClient`, `isReady`, or initial `return null` unless real interactive state is required by the approved plan.',
+      );
+    }
+
     if (componentPlan.type === 'page') {
       lines.push(
         '- This is a PAGE component. Do NOT render your own top-level `<header>`, `<footer>`, or site navigation chrome. The shared Layout wrapper already provides global navigation and footer.',
@@ -3009,6 +3033,37 @@ ${renders}
     );
 
     return lines.join('\n');
+  }
+
+  private collectBlockNodeTextSnippets(nodes: readonly BlockNode[]): string[] {
+    const snippets: string[] = [];
+    const visit = (items: readonly BlockNode[]) => {
+      for (const node of items) {
+        if (snippets.length >= 24) return;
+        const snippet = this.readBlockNodeTextSnippet(node);
+        if (snippet && !snippets.includes(snippet)) snippets.push(snippet);
+        if (node.children?.length) visit(node.children);
+      }
+    };
+    visit(nodes);
+    return snippets;
+  }
+
+  private readBlockNodeTextSnippet(node: BlockNode): string | null {
+    const raw = [
+      (node as { text?: unknown }).text,
+      (node as { label?: unknown }).label,
+      (node as { html?: unknown }).html,
+    ].find((value) => typeof value === 'string' && value.trim());
+    if (typeof raw !== 'string') return null;
+    const normalized = raw
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!normalized || normalized.length > 120) return null;
+    return normalized;
   }
 
   private restoreTrackedSectionMarkers(

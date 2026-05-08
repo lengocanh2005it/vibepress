@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { createHash } from 'crypto';
+import { existsSync, readFileSync } from 'fs';
 import { basename, extname, resolve, join } from 'path';
 import { getConn, getPrefix } from './lib/db-context.js';
 import {
@@ -41,6 +42,7 @@ const PORT = Number(process.env.API_PORT) || 3100;
 const PREVIEW_BASE = process.env.PREVIEW_BASE ?? '';
 const DEFAULT_POSTS_PER_PAGE = 10;
 const MAX_POSTS_PER_PAGE = 50;
+const PAGE_EDIT_OVERRIDES_PATH = join(process.cwd(), 'runtime', 'page-edit-overrides.json');
 const BUILTIN_POST_TYPES = new Set([
   'attachment',
   'revision',
@@ -593,6 +595,52 @@ async function serializeRuntimePage(
   };
 }
 
+function readPageEditOverrides(): Record<string, any[]> {
+  if (!existsSync(PAGE_EDIT_OVERRIDES_PATH)) return {};
+  try {
+    const parsed = JSON.parse(readFileSync(PAGE_EDIT_OVERRIDES_PATH, 'utf-8'));
+    if (!parsed || typeof parsed !== 'object') return {};
+    if (parsed.routes && typeof parsed.routes === 'object') {
+      return parsed.routes;
+    }
+    return parsed;
+  } catch (error) {
+    console.warn(
+      `[runtime-overrides] Failed to read page edit overrides: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return {};
+  }
+}
+
+function applyRuntimePageOverrides(
+  runtimePlan: Record<string, any>,
+  row: any,
+  route: string,
+): Record<string, any> {
+  const overrides = readPageEditOverrides();
+  const slug = String(row?.post_name ?? '').trim();
+  const patches = [
+    ...(Array.isArray(overrides[route]) ? overrides[route] : []),
+    ...(slug && Array.isArray(overrides[slug]) ? overrides[slug] : []),
+  ];
+  if (patches.length === 0) return runtimePlan;
+  return {
+    ...runtimePlan,
+    overrides: {
+      pageSlug: slug,
+      patches,
+    },
+  };
+}
+
+app.get('/api/runtime/edit-overrides', (req, res) => {
+  const rawRoute = typeof req.query.route === 'string' ? req.query.route : '/';
+  const route = rawRoute.replace(/\/+$/, '') || '/';
+  const overrides = readPageEditOverrides();
+  const patches = Array.isArray(overrides[route]) ? overrides[route] : [];
+  res.json({ route, patches });
+});
+
 async function serializePostRows(
   conn: Awaited<ReturnType<typeof getConn>>,
   prefix: string,
@@ -1140,6 +1188,7 @@ registerPageRoutes({
   serializePage,
   serializeRuntimePage,
   buildRuntimePlanFromPageRow,
+  applyRuntimePageOverrides,
 });
 
 app.get('/api/post-types', async (_req, res) => {

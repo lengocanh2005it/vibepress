@@ -27,6 +27,18 @@ export interface CaptureAssetResponse {
   filePath?: string;
 }
 
+export interface CaptureReplacementImageAsset {
+  id: string;
+  provider: 'cloudinary' | 'imagekit';
+  fileName: string;
+  publicUrl: string;
+  mimeType?: string;
+  bytes?: number;
+  width?: number;
+  height?: number;
+  providerAssetId?: string;
+}
+
 // Specific rect types with literal coordinateSpace for type safety
 export interface ViewportCaptureRect {
   x: number;
@@ -109,6 +121,7 @@ export interface CaptureData {
   page: CapturePage;
   selection: CaptureSelection;
   geometry: CaptureGeometry;
+  replacementImages?: CaptureReplacementImageAsset[];
 }
 
 /** Alias for CaptureData — dùng trong Editor state */

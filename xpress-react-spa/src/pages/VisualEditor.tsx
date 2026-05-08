@@ -16,7 +16,7 @@ interface PendingImage {
   fileName: string;
   mimeType: string;
   cloudUrl: string | null;
-  cloudMeta: { provider: string; publicId?: string; bytes?: number; width?: number; height?: number } | null;
+  cloudMeta: { provider: 'cloudinary' | 'imagekit'; publicId?: string; bytes?: number; width?: number; height?: number } | null;
   uploading: boolean;
   error: string | null;
 }
@@ -112,6 +112,8 @@ const roundMetric = (value: number, digits = 4) => {
   const factor = 10 ** digits;
   return Math.round(value * factor) / factor;
 };
+
+const MAX_EDIT_IMAGE_BYTES = 10 * 1024 * 1024;
 
 
 const buildRouteItems = (
@@ -299,6 +301,18 @@ const VisualEditor: React.FC = () => {
   const imageInputRef = useRef<HTMLInputElement>(null);
 
   const handleImageFileSelected = async (file: File) => {
+    if (file.size > MAX_EDIT_IMAGE_BYTES) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `image-too-large-${Date.now()}`,
+          role: "assistant",
+          text: "Ảnh tối đa 10MB. Hãy nén ảnh hoặc chọn ảnh nhỏ hơn.",
+          tone: "error",
+        },
+      ]);
+      return;
+    }
     const id = crypto.randomUUID();
     const localUrl = URL.createObjectURL(file);
     setPendingImages((prev) => [...prev, { id, localUrl, fileName: file.name, mimeType: file.type, cloudUrl: null, cloudMeta: null, uploading: true, error: null }]);
@@ -320,7 +334,7 @@ const VisualEditor: React.FC = () => {
         body: JSON.stringify({ data: base64, fileName: file.name, mimeType: file.type }),
       });
       if (!res.ok) throw new Error((await res.json())?.message || 'Upload failed');
-      const data = await res.json() as { url: string; provider: string; publicId?: string; bytes?: number; width?: number; height?: number };
+      const data = await res.json() as { url: string; provider: 'cloudinary' | 'imagekit'; publicId?: string; bytes?: number; width?: number; height?: number };
       setPendingImages((prev) => prev.map((img) => img.id === id ? { ...img, cloudUrl: data.url, cloudMeta: { provider: data.provider, publicId: data.publicId, bytes: data.bytes, width: data.width, height: data.height }, uploading: false } : img));
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Upload failed';
@@ -499,7 +513,7 @@ const VisualEditor: React.FC = () => {
       imageAssets: pendingImages
         .filter((img) => img.cloudUrl !== null && img.cloudMeta !== null)
         .map((img) => ({
-          provider: img.cloudMeta!.provider as 'cloudinary' | 'imagekit',
+          provider: img.cloudMeta!.provider,
           fileName: img.fileName,
           publicUrl: img.cloudUrl!,
           mimeType: img.mimeType,

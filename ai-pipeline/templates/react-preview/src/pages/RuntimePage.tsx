@@ -7,6 +7,7 @@ import type {
   RuntimeLayoutPolicy,
   RuntimePageRecord,
   RuntimePageResponse,
+  RuntimePagePatch,
   RuntimeStyleSpec,
 } from '../runtime/runtime-contract';
 
@@ -234,10 +235,20 @@ export default function RuntimePage({
   const runtimeContentBlockTree = Array.isArray(runtimePlan?.contentBlockTree)
     ? runtimePlan.contentBlockTree
     : [];
+  const runtimePatches = selectRuntimePagePatches(runtimePlan?.overrides, page.slug);
   const runtimeContentNodes = selectRuntimeContentNodes(
     runtimePlan.blockTree,
     isProfolioFse,
     hasExpandedTemplate,
+  );
+  const patchedRuntimeContentNodes = applyRuntimePagePatches(
+    runtimeContentNodes,
+    runtimePatches,
+    runtimeContentBlockTree.length === 0,
+  );
+  const patchedRuntimeContentBlockTree = applyRuntimePagePatches(
+    runtimeContentBlockTree,
+    runtimePatches,
   );
   const shouldRenderBlockTree =
     runtimeContentNodes.length > 0 && runtimePlan.mode !== 'page-content';
@@ -250,10 +261,10 @@ export default function RuntimePage({
         {...runtimePageDataProps}
       >
         {renderRuntimeNodes(
-          runtimeContentNodes,
+          patchedRuntimeContentNodes,
           page,
           `${page.slug}-runtime`,
-          runtimeContentBlockTree,
+          patchedRuntimeContentBlockTree,
         )}
       </div>
     );
@@ -306,6 +317,223 @@ function selectRuntimeContentNodes(
 function isProfolioContentRoot(node: RuntimeBlockNode): boolean {
   if (node.kind === 'cover') return true;
   return getExplicitRuntimeTag(node) === 'main';
+}
+
+function selectRuntimePagePatches(
+  overrides: RuntimePageResponse['runtimePlan']['overrides'] | undefined,
+  pageSlug: string,
+): RuntimePagePatch[] {
+  if (!overrides || overrides.pageSlug !== pageSlug) return [];
+  return Array.isArray(overrides.patches) ? overrides.patches : [];
+}
+
+function applyRuntimePagePatches(
+  nodes: RuntimeBlockNode[],
+  patches: RuntimePagePatch[],
+  allowAppendUnanchoredInsert = true,
+): RuntimeBlockNode[] {
+  if (!patches.length) return nodes;
+  const result: RuntimeBlockNode[] = [];
+  for (const node of nodes) {
+    const patched = applyRuntimePagePatchesToNode(node, patches);
+    if (!patched) continue;
+    result.push(patched);
+    for (const patch of patches) {
+      if (
+        patch.op === 'insert-simple-section' &&
+        getRuntimePatchAfterSourceNodeId(patch) === getRuntimeNodeSourceNodeId(node)
+      ) {
+        result.push(buildRuntimeInsertedSimpleSection(patch, `${patched.nodeId ?? 'runtime-node'}-inserted`));
+      }
+    }
+  }
+  for (const patch of patches) {
+    if (
+      allowAppendUnanchoredInsert &&
+      patch.op === 'insert-simple-section' &&
+      !getRuntimePatchAfterSourceNodeId(patch)
+    ) {
+      result.push(buildRuntimeInsertedSimpleSection(patch, 'runtime-inserted'));
+    }
+  }
+  return result;
+}
+
+function applyRuntimePagePatchesToNode(
+  node: RuntimeBlockNode,
+  patches: RuntimePagePatch[],
+): RuntimeBlockNode | null {
+  const sourceNodeId = getRuntimeNodeSourceNodeId(node);
+  const directPatches = patches.filter(
+    (patch) => patch.target?.sourceNodeId === sourceNodeId,
+  );
+  if (directPatches.some((patch) => patch.op === 'hide-node')) return null;
+
+  let next: RuntimeBlockNode = { ...node };
+  for (const patch of directPatches) {
+    next = applyRuntimePagePatchToNode(next, patch);
+  }
+
+  if (node.children?.length) {
+    next.children = applyRuntimePagePatches(node.children, patches, false);
+  }
+  return next;
+}
+
+function applyRuntimePagePatchToNode(
+  node: RuntimeBlockNode,
+  patch: RuntimePagePatch,
+): RuntimeBlockNode {
+  const value = patch.value ?? {};
+  if (patch.op === 'replace-text') {
+    const text = readRuntimePatchString(value.text);
+    const html = readRuntimePatchString(value.html);
+    if (!text && !html) return node;
+    return {
+      ...node,
+      ...(text ? { text } : {}),
+      ...(html ? { html } : { html: undefined }),
+    };
+  }
+  if (patch.op === 'update-colors' || patch.op === 'update-style') {
+    const color = readRuntimePatchString(value.color ?? value.textColor);
+    const backgroundColor = readRuntimePatchString(
+      value.backgroundColor ?? value.bgColor,
+    );
+    if (!color && !backgroundColor) return node;
+    return {
+      ...node,
+      ...(color ? { textColor: color } : {}),
+      ...(backgroundColor ? { bgColor: backgroundColor } : {}),
+      style: {
+        ...(node.style ?? {}),
+        colors: {
+          ...(node.style?.colors ?? {}),
+          ...(color ? { text: color } : {}),
+          ...(backgroundColor ? { background: backgroundColor } : {}),
+        },
+      },
+    };
+  }
+  if (patch.op === 'replace-image') {
+    const src = readRuntimePatchString(value.src);
+    const alt = readRuntimePatchString(value.alt);
+    if (!src) return node;
+    return {
+      ...node,
+      src,
+      ...(alt ? { alt } : {}),
+      media: {
+        ...(node.media ?? {}),
+        src,
+        ...(alt ? { alt } : {}),
+      },
+    };
+  }
+  return node;
+}
+
+function buildRuntimeInsertedSimpleSection(
+  patch: RuntimePagePatch,
+  keyPrefix: string,
+): RuntimeBlockNode {
+  const value = patch.value ?? {};
+  const heading = readRuntimePatchString(value.heading) || 'New Section';
+  const body = readRuntimePatchString(value.body);
+  const backgroundImage = readRuntimePatchString(value.backgroundImage ?? value.src);
+  const backgroundColor =
+    readRuntimePatchString(value.backgroundColor) || '#111111';
+  const textColor = readRuntimePatchString(value.textColor) || '#ffffff';
+  const nodeId = `${keyPrefix}-simple-section`;
+  return {
+    nodeId,
+    kind: backgroundImage ? 'cover' : 'group',
+    blockName: backgroundImage ? 'core/cover' : 'core/group',
+    sourceRef: { sourceNodeId: nodeId },
+    customClassNames: ['runtime-page__inserted-section', 'alignfull'],
+    layout: {
+      kind: 'constrained',
+      align: 'full',
+      widthPolicy: 'full-bleed',
+      innerWidthPolicy: 'content',
+    },
+    style: {
+      colors: {
+        background: backgroundColor,
+        text: textColor,
+      },
+      spacing: {
+        padding: {
+          top: '80px',
+          right: '20px',
+          bottom: '80px',
+          left: '20px',
+        },
+      },
+    },
+    ...(backgroundImage
+      ? {
+          src: backgroundImage,
+          alt: readRuntimePatchString(value.imageAlt) || '',
+          attrs: { dimRatio: 70 },
+          overlayColor: backgroundColor,
+        }
+      : {}),
+    children: [
+      {
+        nodeId: `${nodeId}.heading`,
+        kind: 'heading',
+        blockName: 'core/heading',
+        sourceRef: { sourceNodeId: `${nodeId}.heading` },
+        level: 2,
+        text: heading,
+        textAlign: 'center',
+        style: {
+          typography: {
+            textAlign: 'center',
+            fontSize: '2.5rem',
+            lineHeight: '1.15',
+          },
+        },
+      },
+      ...(body
+        ? [
+            {
+              nodeId: `${nodeId}.body`,
+              kind: 'paragraph',
+              blockName: 'core/paragraph',
+              sourceRef: { sourceNodeId: `${nodeId}.body` },
+              text: body,
+              textAlign: 'center',
+              style: {
+                typography: {
+                  textAlign: 'center',
+                  lineHeight: '1.7',
+                },
+              },
+            } as RuntimeBlockNode,
+          ]
+        : []),
+    ],
+  };
+}
+
+function getRuntimeNodeSourceNodeId(node: RuntimeBlockNode): string | undefined {
+  return node.sourceRef?.sourceNodeId ?? node.nodeId;
+}
+
+function getRuntimePatchAfterSourceNodeId(
+  patch: RuntimePagePatch,
+): string | undefined {
+  const value = patch.value ?? {};
+  return (
+    patch.target?.sourceNodeId ||
+    readRuntimePatchString(value.afterSourceNodeId)
+  );
+}
+
+function readRuntimePatchString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
 function renderRuntimeNodes(
@@ -601,8 +829,8 @@ function renderRuntimeImage(node: RuntimeBlockNode, key: string): ReactNode | nu
     key: `${key}-img`,
     src: resolveAsset(node.src),
     alt: node.alt || '',
-    width: node.width || undefined,
-    height: node.height || undefined,
+    width: node.width || node.media?.width || undefined,
+    height: node.height || node.media?.height || undefined,
     loading: 'lazy',
     style: buildRuntimeImageStyle(node),
   });
@@ -660,14 +888,22 @@ function buildRuntimeImageStyle(node: RuntimeBlockNode): CSSProperties {
       ['alignfull', 'alignwide'].includes(className),
     );
   const declaredWidth =
-    typeof node.width === 'number' && node.width > 0 ? node.width : undefined;
+    typeof node.width === 'number' && node.width > 0
+      ? node.width
+      : typeof node.media?.width === 'number' && node.media.width > 0
+        ? node.media.width
+        : undefined;
   const sizeSlugMaxWidth = getRuntimeImageSizeMaxWidth(node);
   const aspectRatio =
-    typeof node.attrs?.aspectRatio === 'string' && node.attrs.aspectRatio.trim()
+    typeof node.media?.aspectRatio === 'string' && node.media.aspectRatio.trim()
+      ? node.media.aspectRatio.trim()
+      : typeof node.attrs?.aspectRatio === 'string' && node.attrs.aspectRatio.trim()
       ? node.attrs.aspectRatio.trim()
       : undefined;
   const objectFit =
-    typeof node.attrs?.scale === 'string' && node.attrs.scale.trim()
+    typeof node.media?.scale === 'string' && node.media.scale.trim()
+      ? node.media.scale.trim()
+      : typeof node.attrs?.scale === 'string' && node.attrs.scale.trim()
       ? node.attrs.scale.trim()
       : undefined;
 
@@ -688,13 +924,18 @@ function buildRuntimeImageStyle(node: RuntimeBlockNode): CSSProperties {
     height: 'auto',
     aspectRatio,
     objectFit: objectFit as CSSProperties['objectFit'],
+    objectPosition: node.media?.objectPosition,
     ...buildRuntimeBorderRadiusStyle(node),
   };
 }
 
 function getRuntimeImageSizeMaxWidth(node: RuntimeBlockNode): number | undefined {
   const sizeSlug =
-    typeof node.attrs?.sizeSlug === 'string' ? node.attrs.sizeSlug.trim() : '';
+    typeof node.media?.sizeSlug === 'string' && node.media.sizeSlug.trim()
+      ? node.media.sizeSlug.trim()
+      : typeof node.attrs?.sizeSlug === 'string'
+        ? node.attrs.sizeSlug.trim()
+        : '';
   const classNames = node.customClassNames ?? [];
   const classSizeSlug =
     classNames
@@ -834,7 +1075,7 @@ function buildRuntimeNodeProps(
     ]),
   ];
   const style = mergeStyles(buildRuntimeNodeStyle(node), options.style);
-  const id = node.domId ?? node.wrapper?.domId;
+  const id = node.domId ?? node.dom?.domId ?? node.wrapper?.domId;
 
   if (classNames.length > 0) props.className = classNames.join(' ');
   if (style) props.style = style;
@@ -858,13 +1099,16 @@ function collectRuntimeBlockClassNames(node: RuntimeBlockNode): string[] {
     ...(DEFAULT_BLOCK_CLASS_NAMES[node.blockName] ?? []),
     ...(blockAlign ? [`align${blockAlign}`] : []),
     ...(node.layout?.kind ? [`is-layout-${node.layout.kind}`] : []),
+    ...(node.dom?.classNames ?? []),
     ...(node.customClassNames ?? []),
     ...(node.style?.classNames ?? []),
   ].filter(Boolean);
 }
 
 function buildRuntimeNodeStyle(node: RuntimeBlockNode): CSSProperties | undefined {
-  const style: CSSProperties = {};
+  const style: CSSProperties = {
+    ...normalizeRuntimeDomStyle(node.dom?.style),
+  };
   const runtimeStyle = node.style;
 
   applyBoxSpacing(style, 'margin', runtimeStyle?.spacing?.margin ?? node.margin);
@@ -1089,6 +1333,32 @@ function applyLayoutStyle(
   if (layout?.alignItems && !style.alignItems) {
     style.alignItems = normalizeFlexAlignment(layout.alignItems);
   }
+  applyRuntimeWidthPolicy(style, layout?.widthPolicy);
+}
+
+function applyRuntimeWidthPolicy(
+  style: CSSProperties,
+  widthPolicy?: string,
+): void {
+  if (!widthPolicy) return;
+  if (widthPolicy === 'full-bleed') {
+    style.width = '100%';
+    style.maxWidth = 'none';
+    return;
+  }
+  if (widthPolicy === 'wide') {
+    style.width = 'min(100%, var(--wp--style--global--wide-size, 1280px))';
+    style.maxWidth = 'var(--wp--style--global--wide-size, 1280px)';
+    style.marginLeft = 'auto';
+    style.marginRight = 'auto';
+    return;
+  }
+  if (widthPolicy === 'content') {
+    style.width = '100%';
+    style.maxWidth = 'var(--wp--style--global--content-size, 1200px)';
+    style.marginLeft = 'auto';
+    style.marginRight = 'auto';
+  }
 }
 
 function getRuntimeTextAlignFromAttrs(
@@ -1149,6 +1419,9 @@ function getExplicitRuntimeTag(node: RuntimeBlockNode): string | undefined {
   if (attrTag) return attrTag.toLowerCase();
   const nodeTag = typeof node.tagName === 'string' ? node.tagName.trim() : '';
   if (nodeTag) return nodeTag.toLowerCase();
+  const domTag =
+    typeof node.dom?.tagName === 'string' ? node.dom.tagName.trim() : '';
+  if (domTag) return domTag.toLowerCase();
   const wrapperTag =
     typeof node.wrapper?.tagName === 'string' ? node.wrapper.tagName.trim() : '';
   return wrapperTag ? wrapperTag.toLowerCase() : undefined;
@@ -1180,6 +1453,22 @@ function normalizeCssValue(
     return raw.includes('-') ? `var(--wp--preset--font-size--${raw})` : raw;
   }
   return raw;
+}
+
+function normalizeRuntimeDomStyle(
+  value?: Record<string, string>,
+): CSSProperties {
+  if (!value) return {};
+  const style: Record<string, string> = {};
+  for (const [property, raw] of Object.entries(value)) {
+    if (typeof raw !== 'string' || !raw.trim()) continue;
+    const normalizedProperty = property
+      .trim()
+      .replace(/^-ms-/, 'ms-')
+      .replace(/-([a-z])/g, (_, char: string) => char.toUpperCase());
+    if (normalizedProperty) style[normalizedProperty] = raw.trim();
+  }
+  return style as CSSProperties;
 }
 
 function resolveRuntimeColor(value?: string | null): string | undefined {
