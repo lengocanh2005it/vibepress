@@ -4,6 +4,7 @@ import { Link, useParams } from 'react-router-dom';
 import type {
   RuntimeBlockNode,
   RuntimeBoxSpacingSpec,
+  RuntimeLayoutPolicy,
   RuntimePageRecord,
   RuntimePageResponse,
   RuntimeStyleSpec,
@@ -226,7 +227,10 @@ export default function RuntimePage({
     'data-runtime-source-kind': sourceKind,
     'data-runtime-layout-family': layoutFamily,
   } as const;
-  const runtimeThemeStyle = buildRuntimeThemeStyle(runtimePlan?.themeTokens);
+  const runtimeThemeStyle = buildRuntimeThemeStyle(
+    runtimePlan?.themeTokens,
+    runtimePlan?.layoutPolicy,
+  );
   const runtimeContentBlockTree = Array.isArray(runtimePlan?.contentBlockTree)
     ? runtimePlan.contentBlockTree
     : [];
@@ -411,6 +415,9 @@ function renderRuntimeNode(
       });
     case 'post-content':
     case 'page-content': {
+      const isStructuralContent =
+        contentBlockTree.length > 0 &&
+        isStructuralRuntimeContent(contentBlockTree);
       const content =
         contentBlockTree.length > 0
           ? renderRuntimeNodes(contentBlockTree, page, `${key}-content-tree`)
@@ -418,12 +425,18 @@ function renderRuntimeNode(
       return createElement(
         resolveRuntimeNodeTag(node, 'div'),
         buildRuntimeNodeProps(node, key, {
-          classNames: [
-            'runtime-page__content',
-            'wp-block-post-content',
-            'prose',
-            'max-w-none',
-          ],
+          classNames: isStructuralContent
+            ? [
+                'runtime-page__content',
+                'wp-block-post-content',
+                'runtime-page__content--structural',
+              ]
+            : [
+                'runtime-page__content',
+                'wp-block-post-content',
+                'prose',
+                'max-w-none',
+              ],
         }),
         content,
       );
@@ -446,6 +459,44 @@ function renderRuntimeNode(
       return null;
     }
   }
+}
+
+function isStructuralRuntimeContent(nodes: RuntimeBlockNode[]): boolean {
+  return nodes.some(isStructuralRuntimeNode);
+}
+
+function isStructuralRuntimeNode(node: RuntimeBlockNode): boolean {
+  const structuralKinds = new Set([
+    'columns',
+    'column',
+    'cover',
+    'gallery',
+    'group',
+    'media-text',
+    'query',
+  ]);
+  const structuralBlocks = new Set([
+    'core/columns',
+    'core/column',
+    'core/cover',
+    'core/gallery',
+    'core/group',
+    'core/media-text',
+    'core/query',
+  ]);
+
+  return (
+    structuralKinds.has(node.kind) ||
+    structuralBlocks.has(node.blockName) ||
+    node.align === 'full' ||
+    node.align === 'wide' ||
+    node.layout?.align === 'full' ||
+    node.layout?.align === 'wide' ||
+    node.layout?.kind === 'constrained' ||
+    node.layout?.kind === 'flex' ||
+    node.layout?.kind === 'grid' ||
+    (node.children ?? []).some(isStructuralRuntimeNode)
+  );
 }
 
 function renderRuntimeCover(
@@ -595,9 +646,16 @@ function renderRuntimeFeaturedImage(
 }
 
 function buildRuntimeImageStyle(node: RuntimeBlockNode): CSSProperties {
+  const layoutContext = node.layoutContext ?? {};
+  const isLayoutBoundImage =
+    layoutContext.inColumn === true ||
+    layoutContext.inGridLayout === true ||
+    layoutContext.inFlexLayout === true;
   const shouldStretch =
     node.align === 'full' ||
     node.align === 'wide' ||
+    node.layout?.align === 'full' ||
+    node.layout?.align === 'wide' ||
     (node.customClassNames ?? []).some((className) =>
       ['alignfull', 'alignwide'].includes(className),
     );
@@ -615,7 +673,13 @@ function buildRuntimeImageStyle(node: RuntimeBlockNode): CSSProperties {
 
   return {
     display: 'block',
-    width: shouldStretch ? '100%' : declaredWidth ? `${declaredWidth}px` : 'auto',
+    width: shouldStretch
+      ? '100%'
+      : declaredWidth
+        ? `${declaredWidth}px`
+        : isLayoutBoundImage
+          ? '100%'
+          : 'auto',
     maxWidth: shouldStretch
       ? '100%'
       : sizeSlugMaxWidth
@@ -783,8 +847,17 @@ function buildRuntimeNodeProps(
 }
 
 function collectRuntimeBlockClassNames(node: RuntimeBlockNode): string[] {
+  const layoutAlign = node.layout?.align;
+  const blockAlign =
+    layoutAlign === 'full' || layoutAlign === 'wide'
+      ? layoutAlign
+      : node.align === 'full' || node.align === 'wide'
+        ? node.align
+        : undefined;
   return [
     ...(DEFAULT_BLOCK_CLASS_NAMES[node.blockName] ?? []),
+    ...(blockAlign ? [`align${blockAlign}`] : []),
+    ...(node.layout?.kind ? [`is-layout-${node.layout.kind}`] : []),
     ...(node.customClassNames ?? []),
     ...(node.style?.classNames ?? []),
   ].filter(Boolean);
@@ -827,7 +900,10 @@ function buildRuntimeNodeStyle(node: RuntimeBlockNode): CSSProperties | undefine
   );
   const fontWeight = runtimeStyle?.typography?.fontWeight;
   const textAlign =
-    runtimeStyle?.typography?.textAlign ?? node.textAlign ?? undefined;
+    runtimeStyle?.typography?.textAlign ??
+    node.textAlign ??
+    getRuntimeTextAlignFromAttrs(node) ??
+    undefined;
 
   if (textColor) style.color = textColor;
   if (backgroundColor) style.backgroundColor = backgroundColor;
@@ -952,17 +1028,22 @@ function applyLayoutStyle(
   const layout = node.layout;
   if (node.kind === 'columns') {
     style.display = 'flex';
+    style.width = '100%';
+    style.minWidth = 0;
     style.flexWrap =
-      (layout?.flexWrap as CSSProperties['flexWrap']) ?? 'wrap';
+      (layout?.flexWrap as CSSProperties['flexWrap']) ?? 'nowrap';
     style.alignItems = normalizeFlexAlignment(node.align) ?? 'flex-start';
     if (layout?.justifyContent) {
       style.justifyContent = normalizeJustifyContent(layout.justifyContent);
     }
-  } else if (node.kind === 'column' && node.columnWidth) {
+  } else if (node.kind === 'column') {
+    style.minWidth = 0;
     const width = normalizeCssValue(node.columnWidth, 'spacing');
     if (width) {
-      style.flex = `0 0 ${width}`;
+      style.flex = `0 1 ${width}`;
       style.maxWidth = width;
+    } else {
+      style.flex = '1 1 0';
     }
   } else if (node.kind === 'buttons') {
     style.display = 'flex';
@@ -980,8 +1061,23 @@ function applyLayoutStyle(
     }
   } else if (layout?.kind === 'flex') {
     style.display = 'flex';
+    if (layout.orientation === 'vertical') {
+      style.flexDirection = 'column';
+      if (layout.justifyContent) {
+        style.alignItems = normalizeJustifyContent(
+          layout.justifyContent,
+        ) as CSSProperties['alignItems'];
+      }
+    } else if (layout.orientation === 'horizontal') {
+      style.flexDirection = 'row';
+      if (layout.justifyContent) {
+        style.justifyContent = normalizeJustifyContent(layout.justifyContent);
+      }
+    }
     style.flexWrap =
       (layout.flexWrap as CSSProperties['flexWrap']) ?? 'wrap';
+  } else if (layout?.kind === 'constrained') {
+    style.width = '100%';
   }
 
   const gap = normalizeCssValue(runtimeStyle?.gap ?? node.gap, 'spacing');
@@ -993,6 +1089,25 @@ function applyLayoutStyle(
   if (layout?.alignItems && !style.alignItems) {
     style.alignItems = normalizeFlexAlignment(layout.alignItems);
   }
+}
+
+function getRuntimeTextAlignFromAttrs(
+  node: RuntimeBlockNode,
+): CSSProperties['textAlign'] | undefined {
+  const raw =
+    typeof node.attrs?.textAlign === 'string' && node.attrs.textAlign.trim()
+      ? node.attrs.textAlign
+      : ['paragraph', 'heading'].includes(node.kind) &&
+          typeof node.attrs?.align === 'string' &&
+          node.attrs.align.trim()
+        ? node.attrs.align
+        : undefined;
+  if (!raw) return undefined;
+  const normalized = raw.trim().toLowerCase();
+  if (['left', 'right', 'center', 'justify'].includes(normalized)) {
+    return normalized as CSSProperties['textAlign'];
+  }
+  return undefined;
 }
 
 function resolveRuntimeNodeTag(
@@ -1136,6 +1251,7 @@ function mergeStyles(
 
 function buildRuntimeThemeStyle(
   themeTokens?: unknown,
+  layoutPolicy?: RuntimeLayoutPolicy,
 ): CSSProperties | undefined {
   if (!themeTokens || typeof themeTokens !== 'object') return undefined;
   const style: Record<string, string> = {};
@@ -1148,8 +1264,27 @@ function buildRuntimeThemeStyle(
 
   const contentSize = readTokenString(layout?.contentSize);
   const wideSize = readTokenString(layout?.wideSize);
-  if (contentSize) style['--wp--style--global--content-size'] = contentSize;
-  if (wideSize) style['--wp--style--global--wide-size'] = wideSize;
+  const policyContentSize = readTokenString(layoutPolicy?.contentSize);
+  const policyWideSize = readTokenString(layoutPolicy?.wideSize);
+  if (policyContentSize || contentSize) {
+    style['--wp--style--global--content-size'] =
+      policyContentSize ?? contentSize!;
+  }
+  if (policyWideSize || wideSize) {
+    style['--wp--style--global--wide-size'] = policyWideSize ?? wideSize!;
+  }
+
+  const rootPadding =
+    (layoutPolicy?.rootPadding as Record<string, unknown> | undefined) ??
+    (spacing?.rootPadding as Record<string, unknown> | undefined);
+  const rootPaddingLeft = readTokenString(rootPadding?.left);
+  const rootPaddingRight = readTokenString(rootPadding?.right);
+  if (rootPaddingLeft) {
+    style['--wp--style--root--padding-left'] = rootPaddingLeft;
+  }
+  if (rootPaddingRight) {
+    style['--wp--style--root--padding-right'] = rootPaddingRight;
+  }
 
   const palette = Array.isArray(colors?.palette) ? colors.palette : [];
   for (const entry of palette) {

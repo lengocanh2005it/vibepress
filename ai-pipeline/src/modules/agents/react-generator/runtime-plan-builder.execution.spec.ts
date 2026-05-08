@@ -104,7 +104,74 @@ describe('runtime-plan-builder execution', () => {
 
     expect(plan.themeTokens.layout.contentSize).toBe('1200px');
     expect(plan.themeTokens.colors.palette[0].slug).toBe('primary');
+    expect(plan.layoutPolicy).toMatchObject({
+      themeSlug: 'profolio-fse',
+      contentSize: '1200px',
+      wideSize: '1200px',
+    });
     expect(plan.contentBlockTree[0].kind).toBe('columns');
     expect(JSON.stringify(plan.blockTree)).toContain('"binding"');
+  });
+
+  it('preserves Gutenberg heading and paragraph alignment attrs in content block trees', () => {
+    const plan = buildRuntimePlanFromPageRow({
+      template: 'templates/template-about.html',
+      is_front_page: 0,
+      is_posts_page: 0,
+      post_name: 'team',
+      post_content: [
+        '<!-- wp:group {"layout":{"type":"flex","orientation":"vertical","justifyContent":"center"}} -->',
+        '<div class="wp-block-group">',
+        '<!-- wp:heading {"textAlign":"center"} --><h2 class="has-text-align-center">Meet our team</h2><!-- /wp:heading -->',
+        '<!-- wp:paragraph {"align":"center"} --><p class="has-text-align-center">Team intro</p><!-- /wp:paragraph -->',
+        '</div>',
+        '<!-- /wp:group -->',
+      ].join('\n'),
+    });
+
+    const group = plan.contentBlockTree[0];
+    const heading = group.children?.[0];
+    const paragraph = group.children?.[1];
+
+    expect(group.layout).toMatchObject({
+      kind: 'flex',
+      orientation: 'vertical',
+      justifyContent: 'center',
+    });
+    expect(heading?.textAlign).toBe('center');
+    expect(heading?.style?.typography?.textAlign).toBe('center');
+    expect(paragraph?.textAlign).toBe('center');
+    expect(paragraph?.style?.typography?.textAlign).toBe('center');
+  });
+
+  it('adds parent-derived layout context to nested content blocks', () => {
+    const plan = buildRuntimePlanFromPageRow({
+      template: 'templates/template-about.html',
+      is_front_page: 0,
+      is_posts_page: 0,
+      post_name: 'image-layout-context',
+      post_content: [
+        '<!-- wp:columns {"align":"wide"} -->',
+        '<div class="wp-block-columns alignwide">',
+        '<!-- wp:column {"width":"40%"} -->',
+        '<div class="wp-block-column" style="flex-basis:40%">',
+        '<!-- wp:image {"sizeSlug":"large"} --><figure class="wp-block-image size-large"><img src="/wp-content/uploads/example.jpg" alt="Example"/></figure><!-- /wp:image -->',
+        '</div>',
+        '<!-- /wp:column -->',
+        '</div>',
+        '<!-- /wp:columns -->',
+      ].join('\n'),
+    });
+
+    const image =
+      plan.contentBlockTree[0].children?.[0].children?.[0];
+
+    expect(image?.kind).toBe('image');
+    expect(image?.layoutContext).toMatchObject({
+      inColumns: true,
+      columnsAlign: 'wide',
+      inColumn: true,
+      columnWidth: '40%',
+    });
   });
 });

@@ -13,6 +13,8 @@ interface RuntimeSectionExtractionOptions {
   preserveSourceStructuralBlocks?: boolean;
 }
 
+type RuntimeLayoutContext = Record<string, any>;
+
 function inferRuntimeThemeSlug(themeDir?: string | null): string {
   const normalized = String(themeDir ?? '')
     .trim()
@@ -492,6 +494,16 @@ function buildRuntimeStyleSpec(block: RuntimeParsedBlock, classNames: string[]) 
   const typography = block.attrs?.style?.typography;
   const dimensions = block.attrs?.style?.dimensions;
   const border = block.attrs?.style?.border;
+  const textAlign =
+    typeof typography?.textAlign === 'string' && typography.textAlign.trim()
+      ? typography.textAlign.trim()
+      : typeof block.attrs?.textAlign === 'string' && block.attrs.textAlign.trim()
+        ? block.attrs.textAlign.trim()
+        : ['core/paragraph', 'core/heading'].includes(block.blockName) &&
+            typeof block.attrs?.align === 'string' &&
+            block.attrs.align.trim()
+          ? block.attrs.align.trim()
+          : undefined;
   const colors: Record<string, string> = {};
   if (typeof block.attrs?.textColor === 'string' && block.attrs.textColor.trim()) {
     colors.text = block.attrs.textColor.trim();
@@ -558,28 +570,25 @@ function buildRuntimeStyleSpec(block: RuntimeParsedBlock, classNames: string[]) 
           },
         }
       : {}),
-    ...(typography && typeof typography === 'object'
+    ...((typography && typeof typography === 'object') || textAlign
       ? {
           typography: {
-            ...(typeof typography.fontSize === 'string' && typography.fontSize.trim()
+            ...(typeof typography?.fontSize === 'string' && typography.fontSize.trim()
               ? { fontSize: typography.fontSize.trim() }
               : {}),
-            ...(typeof typography.lineHeight === 'string' &&
+            ...(typeof typography?.lineHeight === 'string' &&
             typography.lineHeight.trim()
               ? { lineHeight: typography.lineHeight.trim() }
               : {}),
-            ...(typeof typography.fontWeight === 'string' &&
+            ...(typeof typography?.fontWeight === 'string' &&
             typography.fontWeight.trim()
               ? { fontWeight: typography.fontWeight.trim() }
-              : typeof typography.fontStyle === 'string' &&
+              : typeof typography?.fontStyle === 'string' &&
                   typography.fontStyle.trim()
                 ? { fontWeight: typography.fontStyle.trim() }
               : {}),
-            ...(typeof typography.textAlign === 'string' &&
-            typography.textAlign.trim()
-              ? { textAlign: typography.textAlign.trim() }
-              : {}),
-            ...(typeof typography.fontFamily === 'string' &&
+            ...(textAlign ? { textAlign } : {}),
+            ...(typeof typography?.fontFamily === 'string' &&
             typography.fontFamily.trim()
               ? { fontFamily: typography.fontFamily.trim() }
               : {}),
@@ -705,6 +714,7 @@ function buildRuntimeLayoutSpec(block: RuntimeParsedBlock) {
 function buildRuntimeBlockNode(
   block: RuntimeParsedBlock,
   path: string,
+  layoutContext: RuntimeLayoutContext = {},
 ): Record<string, any> {
   const kind =
     block.blockName === 'core/media-text'
@@ -717,14 +727,20 @@ function buildRuntimeBlockNode(
             ? 'column'
             : block.blockName.split('/').pop() || 'group';
   const innerHtml = block.innerHtml.trim();
-  const childNodes = block.children.map((child, index) =>
-    buildRuntimeBlockNode(child, `${path}.${index + 1}`),
-  );
   const classNames = extractRuntimeClassNames(block.attrs, innerHtml);
   const attrs =
     Object.keys(block.attrs).length > 0 ? { ...block.attrs } : undefined;
   const styleSpec = buildRuntimeStyleSpec(block, classNames);
   const layoutSpec = buildRuntimeLayoutSpec(block);
+  const childLayoutContext = buildRuntimeChildLayoutContext(
+    block,
+    kind,
+    layoutSpec,
+    layoutContext,
+  );
+  const childNodes = block.children.map((child, index) =>
+    buildRuntimeBlockNode(child, `${path}.${index + 1}`, childLayoutContext),
+  );
   const wrapperTag =
     block.blockName === 'core/cover'
       ? 'section'
@@ -748,6 +764,9 @@ function buildRuntimeBlockNode(
     ...(attrs ? { attrs } : {}),
     ...(styleSpec ? { style: styleSpec } : {}),
     ...(layoutSpec ? { layout: layoutSpec } : {}),
+    ...(Object.keys(layoutContext).length > 0
+      ? { layoutContext }
+      : {}),
     ...(block.blockName === 'core/post-content' ||
     block.blockName === 'core/page-content'
       ? {
@@ -888,6 +907,60 @@ function buildRuntimeBlockNode(
   }
 
   return node;
+}
+
+function buildRuntimeChildLayoutContext(
+  block: RuntimeParsedBlock,
+  kind: string,
+  layoutSpec: Record<string, any> | undefined,
+  parentContext: RuntimeLayoutContext,
+): RuntimeLayoutContext {
+  const context: RuntimeLayoutContext = {
+    ...parentContext,
+    parentBlockName: block.blockName,
+    parentKind: kind,
+  };
+
+  if (layoutSpec?.kind) context.parentLayoutKind = layoutSpec.kind;
+  if (layoutSpec?.align) context.parentAlign = layoutSpec.align;
+
+  if (block.blockName === 'core/columns') {
+    context.inColumns = true;
+    if (typeof layoutSpec?.columns === 'number') {
+      context.columnsCount = layoutSpec.columns;
+    }
+    if (layoutSpec?.align) context.columnsAlign = layoutSpec.align;
+  }
+
+  if (block.blockName === 'core/column') {
+    context.inColumn = true;
+    if (layoutSpec?.columnWidth) context.columnWidth = layoutSpec.columnWidth;
+  }
+
+  if (layoutSpec?.kind === 'constrained') {
+    context.inConstrainedLayout = true;
+  }
+
+  if (layoutSpec?.kind === 'flex') {
+    context.inFlexLayout = true;
+    if (layoutSpec.orientation) {
+      context.flexOrientation = layoutSpec.orientation;
+    }
+    if (layoutSpec.justifyContent) {
+      context.flexJustifyContent = layoutSpec.justifyContent;
+    }
+  }
+
+  if (layoutSpec?.kind === 'grid') {
+    context.inGridLayout = true;
+    if (typeof layoutSpec.columns === 'number') {
+      context.gridColumns = layoutSpec.columns;
+    }
+  }
+
+  return Object.fromEntries(
+    Object.entries(context).filter(([, value]) => value !== undefined),
+  );
 }
 
 function collectRuntimeSectionsAndBindings(
@@ -1243,6 +1316,10 @@ function readRuntimeThemeTokens(themeDir: string | undefined): Record<string, an
     const styles = themeJson.styles ?? {};
     return {
       layout: settings.layout ?? {},
+      layoutPolicy: {
+        useRootPaddingAwareAlignments:
+          settings.useRootPaddingAwareAlignments === true,
+      },
       colors: {
         palette: settings.color?.palette ?? [],
         gradients: settings.color?.gradients ?? [],
@@ -1263,6 +1340,27 @@ function readRuntimeThemeTokens(themeDir: string | undefined): Record<string, an
   } catch {
     return undefined;
   }
+}
+
+function buildRuntimeLayoutPolicy(
+  themeTokens: Record<string, any> | undefined,
+  themeSlug: string,
+): Record<string, any> | undefined {
+  if (!themeTokens) return undefined;
+  const layout = themeTokens.layout ?? {};
+  const spacing = themeTokens.spacing ?? {};
+  const layoutPolicy = themeTokens.layoutPolicy ?? {};
+  const result = {
+    themeSlug,
+    contentSize: layout.contentSize,
+    wideSize: layout.wideSize,
+    rootPadding: spacing.rootPadding,
+    rootPaddingAwareAlignments:
+      layoutPolicy.useRootPaddingAwareAlignments === true,
+  };
+  return Object.fromEntries(
+    Object.entries(result).filter(([, value]) => value !== undefined),
+  );
 }
 
 function expandTemplateMarkup(
@@ -1385,6 +1483,7 @@ function resolveRuntimeTemplateShellMarkupFromRow(row: any): string {
 export function buildRuntimePlanFromPageRow(row: any) {
   const themeSlug = inferRuntimeThemeSlug(process.env.THEME_DIR);
   const themeDir = process.env.THEME_DIR?.trim();
+  const themeTokens = readRuntimeThemeTokens(themeDir);
   const normalizedTemplate = normalizeRuntimeTemplateSlug(row?.template);
   const resolvedTemplate =
     normalizedTemplate ||
@@ -1419,7 +1518,8 @@ export function buildRuntimePlanFromPageRow(row: any) {
         ? 'best-effort'
         : 'strict-structure',
     layoutFamily: deriveRuntimeLayoutFamily(row, themeSlug),
-    themeTokens: readRuntimeThemeTokens(themeDir),
+    themeTokens,
+    layoutPolicy: buildRuntimeLayoutPolicy(themeTokens, themeSlug),
     source: {
       kind: 'page-post-content',
       template: resolvedTemplate,
