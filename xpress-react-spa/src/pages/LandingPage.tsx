@@ -58,7 +58,7 @@ const LandingPage: React.FC = () => {
                               </div>
                               <div className="w-1/2 relative border-l-4 border-[#4a7c59] z-10 shadow-[-10px_0_30px_rgba(0,0,0,0.2)]">
                                   <img src="https://lh3.googleusercontent.com/aida-public/AB6AXuBGn8oZA1Wgt5Dyy-EhwaaYkkBPA0RDoVJtOv__8JzU0Pq26F0Y7E29Liyf8h3ymtn1R6GhjRoVVIOQAXeFfOzFpK62ooWDukTiARwYeudtQG5u4Un8uxXqGkZY1hE3Px1pmqoNd5phhcSTpemx4Olo7_Rxr6-nc9T5-tpH6vWiZuG42ClmrjUUQL5JOXceEDJhLKHcGzt9_mUzRavOfd18v7nUNgVzzf8t0dW2AZ74j9OkI1r20HDAhIYRTlhg-IOkKeFoWFX9LN0" className="absolute inset-0 w-full h-full object-cover" alt="X-press AI" />
-                                  <div className="absolute top-4 right-4 bg-[#4a7c59] text-white px-3 py-1 text-xs rounded-full uppercase tracking-widest font-bold">X-press AI</div>
+                                  <div className="absolute top-4 right-4 bg-[#4a7c59] text-white px-3 py-1 text-xs rounded-full uppercase tracking-widest font-bold">Vibepress AI</div>
                               </div>
                           </div>
                           {/* Slider Handle UI */}
@@ -231,7 +231,7 @@ const LandingPage: React.FC = () => {
                       <span className="material-symbols-outlined text-[#4a7c59] group-hover:text-white">electrical_services</span>
                   </div>
                   <h4 className="font-headline font-bold text-lg mb-2">Fast Connect</h4>
-                  <p className="text-sm text-[#4a4e4a]">Cài đặt Plugin X-press vào website WordPress hiện có của bạn.</p>
+                  <p className="text-sm text-[#4a4e4a]">Cài đặt Plugin Vibepress vào website WordPress hiện có của bạn.</p>
                   <div className="hidden md:block absolute top-8 -right-4 w-8 h-px bg-[#c4c8bc]"></div>
               </div>
               <div className="relative text-center group">
@@ -287,9 +287,9 @@ const LandingPage: React.FC = () => {
       <footer className="bg-stone-100 w-full py-12 px-6 border-t border-[#4a7c59]/10">
           <div className="grid grid-cols-1 md:grid-cols-4 gap-8 max-w-7xl mx-auto">
               <div className="md:col-span-2">
-                  <span className="font-headline text-xl font-bold text-[#4a7c59] block mb-4">X-press AI</span>
+                  <span className="font-headline text-xl font-bold text-[#4a7c59] block mb-4">Vibepress AI</span>
                   <p className="text-sm leading-relaxed text-stone-500 max-w-sm mb-6">Nền tảng tiên phong ứng dụng AI để cá nhân hóa trải nghiệm người dùng trên WordPress, mang lại sự linh hoạt và tăng trưởng vượt bậc cho doanh nghiệp.</p>
-                  <p className="text-sm text-stone-500">© 2026 X-press AI. Rooted in WordPress.</p>
+                  <p className="text-sm text-stone-500">© 2026 Vibepress AI. Rooted in WordPress.</p>
               </div>
               <div>
                   <h5 className="font-bold text-[#4a7c59] mb-4">Resources</h5>

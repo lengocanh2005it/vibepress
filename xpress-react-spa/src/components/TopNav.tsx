@@ -117,7 +117,7 @@ const TopNav: React.FC<TopNavProps> = ({ registerOpenAuth }) => {
               onClick={() => navigate('/')}
               className="font-headline text-2xl font-bold text-[#4a7c59] hover:opacity-80 transition-opacity"
             >
-              X-press
+              Vibepress
             </button>
             <div className="hidden md:flex gap-6 font-semibold text-sm">
               <a href="/app/projects" className="text-stone-600 hover:text-[#4a7c59] transition-colors">Wordpress Project</a>

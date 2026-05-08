@@ -5,7 +5,7 @@ const TopNavLayout = () => {
     <div className="flex flex-col bg-[#F8F6F1] text-stone-800 font-body antialiased min-h-screen relative">
       <header className="w-full flex justify-between items-center px-8 py-5 relative z-50">
         <div className="flex items-center gap-16">
-          <span className="text-[22px] font-bold text-[#355A44] font-headline italic tracking-tight">X-press AI</span>
+          <span className="text-[22px] font-bold text-[#355A44] font-headline italic tracking-tight">Vibepress AI</span>
           <nav className="hidden lg:flex items-center gap-8">
             <a href="#" className="text-stone-600 hover:text-stone-900 transition-colors text-sm font-medium">Projects</a>
             <a href="#" className="text-stone-900 border-b-2 border-stone-900 pb-1 font-semibold text-sm">Cloud</a>

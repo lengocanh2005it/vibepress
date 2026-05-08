@@ -53,8 +53,8 @@ const DeployDashboard: React.FC = () => {
               <div className="p-3 bg-primary-container rounded-lg mb-4 text-on-primary-container group-hover:scale-110 transition-transform">
                 <span className="material-symbols-outlined text-2xl">rocket_launch</span>
               </div>
-              <span className="font-headline text-xl font-bold text-on-primary">Deploy to X-press Cloud</span>
-              <p className="text-sm text-on-primary-container mt-2 text-left leading-relaxed">Tách hẳn khỏi Wordpress, sử dụng domain của X-press platform với cơ sở dữ liệu độc lập (Host Mode).</p>
+              <span className="font-headline text-xl font-bold text-on-primary">Deploy to Vibepress Cloud</span>
+              <p className="text-sm text-on-primary-container mt-2 text-left leading-relaxed">Tách hẳn khỏi Wordpress, sử dụng domain của Vibepress platform với cơ sở dữ liệu độc lập (Host Mode).</p>
             </button>
           </div>
         </div>
@@ -137,7 +137,7 @@ const DeployDashboard: React.FC = () => {
             <div className="w-12 h-12 bg-white rounded-xl shadow-sm flex items-center justify-center text-primary group-hover:scale-110 transition-transform">
               <span className="material-symbols-outlined text-2xl">sell</span>
             </div>
-            <h3 className="font-bold text-on-surface text-lg">Manage Products directly on X-press</h3>
+            <h3 className="font-bold text-on-surface text-lg">Manage Products directly on Vibepress</h3>
             <p className="text-sm text-on-surface-variant">Update inventory without touching WP Admin.</p>
             <button className="mt-2 text-primary font-bold text-sm w-max flex items-center gap-1 hover:gap-2 transition-all">
               Go to Store <span className="material-symbols-outlined text-sm">arrow_forward</span>

@@ -11,10 +11,10 @@ const Onboarding: React.FC = () => {
         {/* Header */}
         <div className="mb-8">
           <h1 className="font-headline text-[32px] font-bold text-[#233227] leading-tight mb-3">
-            Welcome to X-press AI
+            Welcome to Vibepress AI
           </h1>
           <p className="text-[#5c6860] text-[15px] font-medium max-w-lg">
-            Download and install the plugin to connect your WordPress site to the X-press AI engine.
+            Download and install the plugin to connect your WordPress site to the Vibepress AI engine.
           </p>
         </div>
 
@@ -91,7 +91,7 @@ const Onboarding: React.FC = () => {
           <div>
             <h4 className="text-[14px] font-bold text-[#233227] mb-1">Bảo mật cài đặt</h4>
             <p className="text-[13px] text-[#5c6860] leading-relaxed">
-              Plugin được ký số và bảo mật. X-press AI không chỉnh sửa các file lõi WordPress.
+              Plugin được ký số và bảo mật. Vibepress AI không chỉnh sửa các file lõi WordPress.
             </p>
           </div>
         </div>
