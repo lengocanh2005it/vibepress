@@ -105,6 +105,7 @@ export interface RuntimeBlockNode {
   wrapper?: RuntimeWrapperSpec;
   style?: RuntimeStyleSpec;
   layout?: RuntimeLayoutSpec;
+  layoutContext?: RuntimeBlockLayoutContext;
   binding?: {
     kind?: string;
     source?: string;
@@ -145,12 +146,44 @@ export interface RuntimeBlockNode {
   children?: RuntimeBlockNode[];
 }
 
+export interface RuntimeBlockLayoutContext {
+  parentBlockName?: string;
+  parentKind?: string;
+  parentLayoutKind?: string;
+  parentAlign?: string;
+  inColumns?: boolean;
+  columnsCount?: number;
+  columnsAlign?: string;
+  inColumn?: boolean;
+  columnWidth?: string;
+  inConstrainedLayout?: boolean;
+  inFlexLayout?: boolean;
+  flexOrientation?: string;
+  flexJustifyContent?: string;
+  inGridLayout?: boolean;
+  gridColumns?: number;
+  [key: string]: unknown;
+}
+
 export interface RuntimeThemeTokens {
   layout?: Record<string, unknown>;
+  layoutPolicy?: {
+    useRootPaddingAwareAlignments?: boolean;
+    [key: string]: unknown;
+  };
   colors?: Record<string, unknown>;
   spacing?: Record<string, unknown>;
   typography?: Record<string, unknown>;
   blockStyles?: Record<string, unknown>;
+}
+
+export interface RuntimeLayoutPolicy {
+  themeSlug?: string;
+  contentSize?: string;
+  wideSize?: string;
+  rootPadding?: Record<string, string>;
+  rootPaddingAwareAlignments?: boolean;
+  [key: string]: unknown;
 }
 
 export interface RuntimePageRecord {
@@ -248,6 +281,7 @@ export interface RuntimePagePlan {
   fidelity: 'strict-structure' | 'best-effort';
   layoutFamily?: string;
   themeTokens?: RuntimeThemeTokens;
+  layoutPolicy?: RuntimeLayoutPolicy;
   source: RuntimePageSource;
   support: RuntimePageSupport;
   dataNeeds: string[];

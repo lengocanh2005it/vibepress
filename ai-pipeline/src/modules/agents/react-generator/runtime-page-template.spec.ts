@@ -37,12 +37,21 @@ describe('RuntimePage template source', () => {
     expect(source).toContain('runtime-page--theme-profolio-fse');
   });
 
-  it('wraps runtime post content with WordPress/prose spacing classes', () => {
+  it('wraps simple runtime post content with WordPress/prose spacing classes', () => {
     expect(source).toContain("'core/post-content': ['wp-block-post-content']");
     expect(source).toContain("'runtime-page__content'");
     expect(source).toContain("'wp-block-post-content'");
     expect(source).toContain("'prose'");
     expect(source).toContain("'max-w-none'");
+  });
+
+  it('does not force complex Gutenberg content block trees through prose layout', () => {
+    expect(source).toContain('function isStructuralRuntimeContent(');
+    expect(source).toContain('function isStructuralRuntimeNode(');
+    expect(source).toContain("'runtime-page__content--structural'");
+    expect(source).toContain("node.layout?.kind === 'constrained'");
+    expect(source).toContain("node.align === 'full'");
+    expect(source).toContain('isStructuralContent');
   });
 
   it('trims expanded profolio-fse templates down to content-shell roots before rendering', () => {
@@ -84,7 +93,7 @@ describe('RuntimePage template source', () => {
     expect(source).toContain("node.align === 'full'");
     expect(source).toContain("node.align === 'wide'");
     expect(source).toContain('node.attrs?.sizeSlug');
-    expect(source).toContain("width: shouldStretch ? '100%'");
+    expect(source).toContain('width: shouldStretch');
     expect(source).toContain('maxWidth: shouldStretch');
   });
 
@@ -106,13 +115,40 @@ describe('RuntimePage template source', () => {
     expect(source).toContain('renderRuntimeNodes(contentBlockTree, page');
   });
 
+  it('keeps Gutenberg column layouts horizontal on desktop while allowing mobile stacking', () => {
+    expect(source).toContain("style.flexWrap =");
+    expect(source).toContain("?? 'nowrap'");
+    expect(source).toContain('style.flex = `0 1 ${width}`');
+    expect(source).toContain("style.flex = '1 1 0'");
+    expect(source).toContain('style.minWidth = 0');
+  });
+
+  it('maps Gutenberg text alignment and vertical flex justification faithfully', () => {
+    expect(source).toContain('function getRuntimeTextAlignFromAttrs(');
+    expect(source).toContain('node.attrs?.textAlign');
+    expect(source).toContain("typeof node.attrs?.align === 'string'");
+    expect(source).toContain("layout.orientation === 'vertical'");
+    expect(source).toContain('style.alignItems = normalizeJustifyContent(');
+  });
+
   it('applies runtime theme tokens as WordPress CSS variables', () => {
     expect(source).toContain(
-      'buildRuntimeThemeStyle(runtimePlan?.themeTokens)',
+      'buildRuntimeThemeStyle(',
     );
     expect(source).toContain('function buildRuntimeThemeStyle(');
+    expect(source).toContain('runtimePlan?.layoutPolicy');
     expect(source).toContain('--wp--style--global--content-size');
+    expect(source).toContain('--wp--style--root--padding-left');
+    expect(source).toContain('--wp--style--root--padding-right');
     expect(source).toContain('--wp--preset--color--');
     expect(source).toContain('--wp--preset--spacing--');
+  });
+
+  it('uses runtime layout context to size images inside structural layouts', () => {
+    expect(source).toContain('const layoutContext = node.layoutContext ?? {};');
+    expect(source).toContain('layoutContext.inColumn === true');
+    expect(source).toContain('layoutContext.inGridLayout === true');
+    expect(source).toContain('layoutContext.inFlexLayout === true');
+    expect(source).toContain("isLayoutBoundImage\n          ? '100%'");
   });
 });
