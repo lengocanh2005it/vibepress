@@ -3110,17 +3110,6 @@ export default function ${component.name}() {
         const wpBaseUrl = content.siteInfo.siteUrl || 'http://localhost:8000/';
         const reactBeUrl = preview.apiBaseUrl.replace(/\/api\/?$/, '');
         const compareMode = 'baseline';
-        const targetAccuracyPercent = 70;
-        const maxMetricRepairRounds = 4;
-        const previewTokens =
-          'tokens' in normalizedTheme
-            ? ((normalizedTheme as { tokens?: ThemeTokens }).tokens ??
-              undefined)
-            : undefined;
-        const cloneGeneratedComponents = (
-          source: ReactGenerateResult['components'],
-        ): ReactGenerateResult['components'] =>
-          source.map((component) => ({ ...component }));
         const formatAccuracyLabel = (value: number | null) =>
           value === null ? 'unknown' : `${value.toFixed(2)}%`;
         const skipVisualCompareIfRequested = async (
@@ -3239,7 +3228,7 @@ export default function ${component.name}() {
           state,
           '9_visual_compare',
           0.2,
-          `Running site compare metrics across WordPress and the React preview (target >= ${targetAccuracyPercent}%, max ${maxMetricRepairRounds} repair rounds).`,
+          'Running site compare metrics across WordPress and the React preview.',
         );
         await skipVisualCompareIfRequested(
           'Visual compare was skipped before baseline comparison started.',
@@ -3260,181 +3249,20 @@ export default function ${component.name}() {
           'Visual compare was skipped after the current baseline compare task finished.',
         );
 
-        if (metrics) {
-          let currentAccuracy = this.extractAccuracySummary(metrics).percent;
-          let bestAccuracy = currentAccuracy ?? -1;
-          let bestMetrics = metrics;
-          let bestComponents = cloneGeneratedComponents(buildComponents);
-
-          await this.logToFile(
-            logPath,
-            `[Visual Metrics Loop] Initial accuracy=${formatAccuracyLabel(currentAccuracy)} target>=${targetAccuracyPercent}% maxRounds=${maxMetricRepairRounds}`,
-          );
-
-          for (
-            let round = 1;
-            round <= maxMetricRepairRounds && metrics;
-            round++
-          ) {
-            if (
-              currentAccuracy !== null &&
-              currentAccuracy >= targetAccuracyPercent
-            ) {
-              await this.logToFile(
-                logPath,
-                `[Visual Metrics Loop] Target reached before round ${round}: accuracy=${formatAccuracyLabel(currentAccuracy)} >= ${targetAccuracyPercent}%. Stopping metric repair loop.`,
-              );
-              break;
-            }
-            await skipVisualCompareIfRequested(
-              `Visual compare was skipped before metric repair round ${round} started.`,
-            );
-
-            this.emitStepProgress(
-              state,
-              '9_visual_compare',
-              Math.min(0.3 + round * 0.12, 0.82),
-              `Metric repair round ${round}/${maxMetricRepairRounds}: current accuracy ${formatAccuracyLabel(currentAccuracy)}, target ${targetAccuracyPercent}%`,
-            );
-            await this.logToFile(
-              logPath,
-              `[Visual Metrics Loop] Round ${round}/${maxMetricRepairRounds} starting from accuracy=${formatAccuracyLabel(currentAccuracy)} (target>=${targetAccuracyPercent}%).`,
-            );
-
-            const visualRepairResult = await this.applyVisualMetricsRepairPass({
-              state,
-              stepName: '9_visual_compare',
-              metrics,
-              preview,
-              components: buildComponents,
-              plan: reviewResult.plan,
-              content,
-              tokens: previewTokens,
-              fixAgentModel: resolvedModels.fixAgent,
-              logPath,
-            });
-            buildComponents = visualRepairResult.components;
-            await skipVisualCompareIfRequested(
-              `Visual compare was skipped after metric repair round ${round} finished applying changes.`,
-            );
-
-            if (!visualRepairResult.applied) {
-              await this.logToFile(
-                logPath,
-                `[Visual Metrics Loop] Round ${round}/${maxMetricRepairRounds} produced no accepted repairs. Stopping metric repair loop.`,
-              );
-              break;
-            }
-
-            try {
-              const roundMetrics = await runSkippableCompareRound(
-                `round-${round}`,
-              );
-              await skipVisualCompareIfRequested(
-                `Visual compare was skipped after re-checking preview metrics for round ${round}.`,
-              );
-              if (!roundMetrics) {
-                await this.logToFile(
-                  logPath,
-                  `[Visual Metrics Loop] Round ${round}/${maxMetricRepairRounds} compare returned no metrics after repair. Stopping metric repair loop and keeping the latest valid preview snapshot.`,
-                );
-                metrics = bestMetrics;
-                break;
-              }
-
-              const nextAccuracy =
-                this.extractAccuracySummary(roundMetrics).percent;
-              await this.logToFile(
-                logPath,
-                `[Visual Metrics Loop] Round ${round}/${maxMetricRepairRounds} result: accuracy=${formatAccuracyLabel(nextAccuracy)} previous=${formatAccuracyLabel(currentAccuracy)} best=${formatAccuracyLabel(bestAccuracy)} target>=${targetAccuracyPercent}%.`,
-              );
-
-              if (nextAccuracy !== null && nextAccuracy > bestAccuracy) {
-                bestAccuracy = nextAccuracy;
-                bestMetrics = roundMetrics;
-                bestComponents = cloneGeneratedComponents(buildComponents);
-                await this.logToFile(
-                  logPath,
-                  `[Visual Metrics Loop] Round ${round}/${maxMetricRepairRounds} established a new best snapshot at accuracy=${formatAccuracyLabel(bestAccuracy)}.`,
-                );
-              } else {
-                await this.logToFile(
-                  logPath,
-                  `[Visual Metrics Loop] Round ${round}/${maxMetricRepairRounds} did not beat the best snapshot. Restoring best-known preview at accuracy=${formatAccuracyLabel(bestAccuracy)} before continuing.`,
-                );
-                buildComponents = cloneGeneratedComponents(bestComponents);
-                await this.previewBuilder.syncGeneratedComponents(
-                  preview.previewDir,
-                  buildComponents,
-                  previewTokens,
-                );
-              }
-
-              metrics = bestMetrics;
-              currentAccuracy = bestAccuracy;
-
-              if (
-                currentAccuracy !== null &&
-                currentAccuracy >= targetAccuracyPercent
-              ) {
-                await this.logToFile(
-                  logPath,
-                  `[Visual Metrics Loop] Target reached after round ${round}: accuracy=${formatAccuracyLabel(currentAccuracy)} >= ${targetAccuracyPercent}%. Stopping metric repair loop.`,
-                );
-                break;
-              }
-            } catch (err: any) {
-              if (err instanceof PipelineStepSkipError) {
-                throw err;
-              }
-              this.logger.error(
-                `[site-compare] re-run after visual repair failed — ${err?.message ?? err}`,
-                err?.response?.data ?? err?.stack,
-              );
-              await this.logToFile(
-                logPath,
-                `[Visual Metrics Loop] Round ${round}/${maxMetricRepairRounds} compare failed after repair: ${err?.message ?? err}. Restoring best-known snapshot and stopping metric repair loop.`,
-              );
-              buildComponents = cloneGeneratedComponents(bestComponents);
-              metrics = bestMetrics;
-              try {
-                await this.previewBuilder.syncGeneratedComponents(
-                  preview.previewDir,
-                  buildComponents,
-                  previewTokens,
-                );
-              } catch (restoreError: any) {
-                await this.logToFile(
-                  logPath,
-                  `[Visual Metrics Loop] Failed to restore best-known snapshot after compare error: ${restoreError?.message ?? restoreError}`,
-                );
-              }
-              break;
-            }
-          }
-
-          if (
-            currentAccuracy !== null &&
-            currentAccuracy < targetAccuracyPercent
-          ) {
-            await this.logToFile(
-              logPath,
-              `[Visual Metrics Loop] Finished below target after up to ${maxMetricRepairRounds} round(s). bestAccuracy=${formatAccuracyLabel(currentAccuracy)} target>=${targetAccuracyPercent}%.`,
-            );
-          } else if (currentAccuracy !== null) {
-            await this.logToFile(
-              logPath,
-              `[Visual Metrics Loop] Finished with target met. bestAccuracy=${formatAccuracyLabel(currentAccuracy)} target>=${targetAccuracyPercent}%.`,
-            );
-          }
-        }
+        const baselineAccuracy = this.extractAccuracySummary(metrics).percent;
+        await this.logToFile(
+          logPath,
+          metrics
+            ? `[Visual Compare] Automation baseline compare completed. accuracy=${formatAccuracyLabel(baselineAccuracy)}. Metric-driven AI diagnosis/repair is disabled; keeping the current preview snapshot.`
+            : '[Visual Compare] Automation baseline compare returned no metrics. Metric-driven AI diagnosis/repair is disabled; keeping the current preview snapshot.',
+        );
 
         this.emitStepProgress(
           state,
           '9_visual_compare',
           0.9,
           metrics
-            ? 'Final site-compare metrics are attached.'
+            ? 'Automation site-compare metrics are attached. AI metric repair is disabled.'
             : 'Site compare did not return metrics; pipeline will continue.',
           metrics
             ? this.buildPreviewEventData({

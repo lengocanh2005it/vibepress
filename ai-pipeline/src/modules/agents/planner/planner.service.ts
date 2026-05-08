@@ -3876,6 +3876,7 @@ export class PlannerService {
       /(^|[-_/])single($|[-_/])/.test(componentKey);
     const isPageDetailTemplate =
       templateBase === 'page' ||
+      templateBase === 'single-page' ||
       templateBase.startsWith('page-') ||
       templateBase === 'full-width' ||
       templateBase === 'blank' ||
@@ -3964,6 +3965,8 @@ export class PlannerService {
     if (hasPostContent || hasPostAuxiliary) {
       if (isSingleProduct || isProductSurface) {
         needs.add('product-detail');
+      } else if (isPageDetailTemplate) {
+        needs.add('page-detail');
       } else if (isSinglePost || componentPlan.isDetail) {
         needs.add('post-detail');
       }
@@ -4003,6 +4006,10 @@ export class PlannerService {
         needs.add('post-detail');
         if (hasQuery || hasSidebarPostWidgets) needs.add('posts');
         if (hasComments) needs.add('comments');
+      }
+      if (templateBase === 'single-page') {
+        needs.add('page-detail');
+        if (hasQuery || hasSidebarPostWidgets) needs.add('posts');
       }
       if (['cart', 'checkout'].includes(templateBase)) {
         needs.add('products');
@@ -4546,6 +4553,7 @@ Theme-specific source evidence rules:
 - profolio-fse single-product / WooCommerce product-detail patterns need ["product-detail"] and also ["products"] when related-products or product query blocks are present.
 - profolio-fse archive-product, cart, and checkout need ["products"], not ["posts"].
 - profolio-fse single / single-post with sidebar, latest-posts, categories, tags, or post navigation needs ["post-detail", "posts"]; add "comments" only when comments or post-comments-form blocks exist.
+- profolio-fse single-page / page-detail patterns with sidebar latest-posts, categories, or tags need ["page-detail", "posts"].
 - profolio-fse archive, search, index, blog-left-sidebar, blog-right-sidebar, and Sidebar content widgets need ["posts"].
 - profolio-fse template-services needs ["posts"] only when the source-chain includes the articles/query pattern; template-about/contact/front-page should not request posts unless their source-chain actually includes a query/listing block.
 

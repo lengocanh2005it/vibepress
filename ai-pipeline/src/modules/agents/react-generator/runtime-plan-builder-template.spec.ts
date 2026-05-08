@@ -34,4 +34,18 @@ describe('runtime-plan-builder template source', () => {
     expect(source).toContain('expandTemplateMarkup');
     expect(source).toContain('<!--\\s*wp:post-content');
   });
+
+  it('keeps template content slots separate from DB-backed content block trees', () => {
+    expect(source).toContain('resolveRuntimeTemplateShellMarkupFromRow');
+    expect(source).toContain('preserveContentSlots');
+    expect(source).toContain("kind: 'content-slot'");
+    expect(source).toContain('contentBlockTree');
+  });
+
+  it('returns theme.json tokens for deterministic runtime rendering', () => {
+    expect(source).toContain('readRuntimeThemeTokens');
+    expect(source).toContain("join(themeDir, 'theme.json')");
+    expect(source).toContain('blockStyles: styles.blocks');
+    expect(source).toContain('themeTokens: readRuntimeThemeTokens');
+  });
 });

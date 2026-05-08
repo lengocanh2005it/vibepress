@@ -1184,7 +1184,9 @@ export class ReactGeneratorService {
             ...(current.attrs ?? {}),
             className: String(current.attrs?.className ?? '')
               .split(/\s+/)
-              .filter((className) => className && className !== 'is-style-outline')
+              .filter(
+                (className) => className && className !== 'is-style-outline',
+              )
               .join(' '),
           },
         };
@@ -1468,7 +1470,10 @@ export class ReactGeneratorService {
         ...(section.obligation?.sourceEvidence?.sourceNodeIds ?? []),
       ].filter((value): value is string => !!value?.trim());
       const belongsToCluster = sectionSourceIds.some((sourceNodeId) =>
-        this.isSourcePathWithinCluster(this.sourceNodePath(sourceNodeId), nodePath),
+        this.isSourcePathWithinCluster(
+          this.sourceNodePath(sourceNodeId),
+          nodePath,
+        ),
       );
       if (!belongsToCluster || section.type !== 'media-text') return section;
 
@@ -2284,7 +2289,9 @@ ${assignments.join('\n')}
       normalized.includes('visual section contracts violated') ||
       normalized.includes('post-content must render post body') ||
       normalized.includes('comments list is missing comment body rendering') ||
-      normalized.includes('comment form is missing the required author field') ||
+      normalized.includes(
+        'comment form is missing the required author field',
+      ) ||
       normalized.includes('comment form is missing the required email field')
     );
   }

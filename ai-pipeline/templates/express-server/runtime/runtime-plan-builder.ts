@@ -13,6 +13,8 @@ interface RuntimeSectionExtractionOptions {
   preserveSourceStructuralBlocks?: boolean;
 }
 
+type RuntimeLayoutContext = Record<string, any>;
+
 function inferRuntimeThemeSlug(themeDir?: string | null): string {
   const normalized = String(themeDir ?? '')
     .trim()
@@ -491,6 +493,17 @@ function buildRuntimeStyleSpec(block: RuntimeParsedBlock, classNames: string[]) 
   const spacing = block.attrs?.style?.spacing;
   const typography = block.attrs?.style?.typography;
   const dimensions = block.attrs?.style?.dimensions;
+  const border = block.attrs?.style?.border;
+  const textAlign =
+    typeof typography?.textAlign === 'string' && typography.textAlign.trim()
+      ? typography.textAlign.trim()
+      : typeof block.attrs?.textAlign === 'string' && block.attrs.textAlign.trim()
+        ? block.attrs.textAlign.trim()
+        : ['core/paragraph', 'core/heading'].includes(block.blockName) &&
+            typeof block.attrs?.align === 'string' &&
+            block.attrs.align.trim()
+          ? block.attrs.align.trim()
+          : undefined;
   const colors: Record<string, string> = {};
   if (typeof block.attrs?.textColor === 'string' && block.attrs.textColor.trim()) {
     colors.text = block.attrs.textColor.trim();
@@ -513,9 +526,8 @@ function buildRuntimeStyleSpec(block: RuntimeParsedBlock, classNames: string[]) 
     colors.overlay = block.attrs.customOverlayColor.trim();
   }
   const borderRadius =
-    typeof block.attrs?.style?.border?.radius === 'string' &&
-    block.attrs.style.border.radius.trim()
-      ? block.attrs.style.border.radius.trim()
+    typeof border?.radius === 'string' && border.radius.trim()
+      ? border.radius.trim()
       : undefined;
   const blockGap = extractRuntimeBlockGap(spacing?.blockGap);
   const gap =
@@ -528,6 +540,24 @@ function buildRuntimeStyleSpec(block: RuntimeParsedBlock, classNames: string[]) 
     ...(classNames.length ? { classNames } : {}),
     ...(Object.keys(colors).length > 0 ? { colors } : {}),
     ...(borderRadius ? { borderRadius } : {}),
+    ...(border && typeof border === 'object'
+      ? {
+          border: {
+            ...(typeof border.width === 'string' && border.width.trim()
+              ? { width: border.width.trim() }
+              : {}),
+            ...(typeof border.style === 'string' && border.style.trim()
+              ? { style: border.style.trim() }
+              : {}),
+            ...(typeof border.color === 'string' && border.color.trim()
+              ? { color: border.color.trim() }
+              : {}),
+            ...(border.radius && typeof border.radius === 'object'
+              ? { radius: border.radius }
+              : {}),
+          },
+        }
+      : {}),
     ...(gap ? { gap } : {}),
     ...(spacing
       ? {
@@ -540,28 +570,25 @@ function buildRuntimeStyleSpec(block: RuntimeParsedBlock, classNames: string[]) 
           },
         }
       : {}),
-    ...(typography && typeof typography === 'object'
+    ...((typography && typeof typography === 'object') || textAlign
       ? {
           typography: {
-            ...(typeof typography.fontSize === 'string' && typography.fontSize.trim()
+            ...(typeof typography?.fontSize === 'string' && typography.fontSize.trim()
               ? { fontSize: typography.fontSize.trim() }
               : {}),
-            ...(typeof typography.lineHeight === 'string' &&
+            ...(typeof typography?.lineHeight === 'string' &&
             typography.lineHeight.trim()
               ? { lineHeight: typography.lineHeight.trim() }
               : {}),
-            ...(typeof typography.fontWeight === 'string' &&
+            ...(typeof typography?.fontWeight === 'string' &&
             typography.fontWeight.trim()
               ? { fontWeight: typography.fontWeight.trim() }
-              : typeof typography.fontStyle === 'string' &&
+              : typeof typography?.fontStyle === 'string' &&
                   typography.fontStyle.trim()
                 ? { fontWeight: typography.fontStyle.trim() }
               : {}),
-            ...(typeof typography.textAlign === 'string' &&
-            typography.textAlign.trim()
-              ? { textAlign: typography.textAlign.trim() }
-              : {}),
-            ...(typeof typography.fontFamily === 'string' &&
+            ...(textAlign ? { textAlign } : {}),
+            ...(typeof typography?.fontFamily === 'string' &&
             typography.fontFamily.trim()
               ? { fontFamily: typography.fontFamily.trim() }
               : {}),
@@ -592,6 +619,9 @@ function buildRuntimeStyleSpec(block: RuntimeParsedBlock, classNames: string[]) 
   }
   if (styleSpec.dimensions && Object.keys(styleSpec.dimensions).length === 0) {
     delete styleSpec.dimensions;
+  }
+  if (styleSpec.border && Object.keys(styleSpec.border).length === 0) {
+    delete styleSpec.border;
   }
 
   return Object.keys(styleSpec).length > 0 ? styleSpec : undefined;
@@ -624,6 +654,14 @@ function buildRuntimeLayoutSpec(block: RuntimeParsedBlock) {
     }
     if (typeof layout.flexWrap === 'string' && layout.flexWrap.trim()) {
       result.flexWrap = layout.flexWrap.trim();
+    } else if (layout.flexWrap === false) {
+      result.flexWrap = 'nowrap';
+    }
+    if (typeof layout.contentSize === 'string' && layout.contentSize.trim()) {
+      result.contentSize = layout.contentSize.trim();
+    }
+    if (typeof layout.wideSize === 'string' && layout.wideSize.trim()) {
+      result.wideSize = layout.wideSize.trim();
     }
     if (typeof layout.columnCount === 'number' && layout.columnCount > 0) {
       result.columns = layout.columnCount;
@@ -661,12 +699,22 @@ function buildRuntimeLayoutSpec(block: RuntimeParsedBlock) {
     const childCount = block.children.length;
     if (childCount > 1) result.columns = childCount;
   }
+  if (
+    block.blockName === 'core/columns' &&
+    block.attrs?.isStackedOnMobile !== false
+  ) {
+    result.responsive = {
+      stackOnMobile: true,
+      breakpoint: 780,
+    };
+  }
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
 function buildRuntimeBlockNode(
   block: RuntimeParsedBlock,
   path: string,
+  layoutContext: RuntimeLayoutContext = {},
 ): Record<string, any> {
   const kind =
     block.blockName === 'core/media-text'
@@ -679,14 +727,20 @@ function buildRuntimeBlockNode(
             ? 'column'
             : block.blockName.split('/').pop() || 'group';
   const innerHtml = block.innerHtml.trim();
-  const childNodes = block.children.map((child, index) =>
-    buildRuntimeBlockNode(child, `${path}.${index + 1}`),
-  );
   const classNames = extractRuntimeClassNames(block.attrs, innerHtml);
   const attrs =
     Object.keys(block.attrs).length > 0 ? { ...block.attrs } : undefined;
   const styleSpec = buildRuntimeStyleSpec(block, classNames);
   const layoutSpec = buildRuntimeLayoutSpec(block);
+  const childLayoutContext = buildRuntimeChildLayoutContext(
+    block,
+    kind,
+    layoutSpec,
+    layoutContext,
+  );
+  const childNodes = block.children.map((child, index) =>
+    buildRuntimeBlockNode(child, `${path}.${index + 1}`, childLayoutContext),
+  );
   const wrapperTag =
     block.blockName === 'core/cover'
       ? 'section'
@@ -710,6 +764,18 @@ function buildRuntimeBlockNode(
     ...(attrs ? { attrs } : {}),
     ...(styleSpec ? { style: styleSpec } : {}),
     ...(layoutSpec ? { layout: layoutSpec } : {}),
+    ...(Object.keys(layoutContext).length > 0
+      ? { layoutContext }
+      : {}),
+    ...(block.blockName === 'core/post-content' ||
+    block.blockName === 'core/page-content'
+      ? {
+          binding: {
+            kind: 'content-slot',
+            source: 'page.content',
+          },
+        }
+      : {}),
     ...((wrapperTag || block.blockName === 'core/cover')
       ? {
           wrapper: {
@@ -841,6 +907,60 @@ function buildRuntimeBlockNode(
   }
 
   return node;
+}
+
+function buildRuntimeChildLayoutContext(
+  block: RuntimeParsedBlock,
+  kind: string,
+  layoutSpec: Record<string, any> | undefined,
+  parentContext: RuntimeLayoutContext,
+): RuntimeLayoutContext {
+  const context: RuntimeLayoutContext = {
+    ...parentContext,
+    parentBlockName: block.blockName,
+    parentKind: kind,
+  };
+
+  if (layoutSpec?.kind) context.parentLayoutKind = layoutSpec.kind;
+  if (layoutSpec?.align) context.parentAlign = layoutSpec.align;
+
+  if (block.blockName === 'core/columns') {
+    context.inColumns = true;
+    if (typeof layoutSpec?.columns === 'number') {
+      context.columnsCount = layoutSpec.columns;
+    }
+    if (layoutSpec?.align) context.columnsAlign = layoutSpec.align;
+  }
+
+  if (block.blockName === 'core/column') {
+    context.inColumn = true;
+    if (layoutSpec?.columnWidth) context.columnWidth = layoutSpec.columnWidth;
+  }
+
+  if (layoutSpec?.kind === 'constrained') {
+    context.inConstrainedLayout = true;
+  }
+
+  if (layoutSpec?.kind === 'flex') {
+    context.inFlexLayout = true;
+    if (layoutSpec.orientation) {
+      context.flexOrientation = layoutSpec.orientation;
+    }
+    if (layoutSpec.justifyContent) {
+      context.flexJustifyContent = layoutSpec.justifyContent;
+    }
+  }
+
+  if (layoutSpec?.kind === 'grid') {
+    context.inGridLayout = true;
+    if (typeof layoutSpec.columns === 'number') {
+      context.gridColumns = layoutSpec.columns;
+    }
+  }
+
+  return Object.fromEntries(
+    Object.entries(context).filter(([, value]) => value !== undefined),
+  );
 }
 
 function collectRuntimeSectionsAndBindings(
@@ -1186,12 +1306,70 @@ function stripPhpPatternHeader(markup: string): string {
   return firstBlockIndex > 0 ? markup.slice(firstBlockIndex) : markup;
 }
 
+function readRuntimeThemeTokens(themeDir: string | undefined): Record<string, any> | undefined {
+  if (!themeDir) return undefined;
+  const themeJsonPath = join(themeDir, 'theme.json');
+  if (!existsSync(themeJsonPath)) return undefined;
+  try {
+    const themeJson = JSON.parse(readFileSync(themeJsonPath, 'utf-8')) as Record<string, any>;
+    const settings = themeJson.settings ?? {};
+    const styles = themeJson.styles ?? {};
+    return {
+      layout: settings.layout ?? {},
+      layoutPolicy: {
+        useRootPaddingAwareAlignments:
+          settings.useRootPaddingAwareAlignments === true,
+      },
+      colors: {
+        palette: settings.color?.palette ?? [],
+        gradients: settings.color?.gradients ?? [],
+      },
+      spacing: {
+        spacingSizes: settings.spacing?.spacingSizes ?? [],
+        units: settings.spacing?.units ?? [],
+        rootPadding: styles.spacing?.padding ?? {},
+        blockGap: styles.spacing?.blockGap,
+      },
+      typography: {
+        fontFamilies: settings.typography?.fontFamilies ?? [],
+        fontSizes: settings.typography?.fontSizes ?? [],
+        root: styles.typography ?? {},
+      },
+      blockStyles: styles.blocks ?? {},
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function buildRuntimeLayoutPolicy(
+  themeTokens: Record<string, any> | undefined,
+  themeSlug: string,
+): Record<string, any> | undefined {
+  if (!themeTokens) return undefined;
+  const layout = themeTokens.layout ?? {};
+  const spacing = themeTokens.spacing ?? {};
+  const layoutPolicy = themeTokens.layoutPolicy ?? {};
+  const result = {
+    themeSlug,
+    contentSize: layout.contentSize,
+    wideSize: layout.wideSize,
+    rootPadding: spacing.rootPadding,
+    rootPaddingAwareAlignments:
+      layoutPolicy.useRootPaddingAwareAlignments === true,
+  };
+  return Object.fromEntries(
+    Object.entries(result).filter(([, value]) => value !== undefined),
+  );
+}
+
 function expandTemplateMarkup(
   markup: string,
   postContent: string,
   themeDir: string,
   seen: Set<string>,
   depth = 0,
+  options: { preserveContentSlots?: boolean } = {},
 ): string {
   if (depth > 5) return markup;
 
@@ -1212,7 +1390,7 @@ function expandTemplateMarkup(
             const cleaned = stripPhpPatternHeader(raw);
             const nextSeen = new Set(seen);
             nextSeen.add(slug);
-            return expandTemplateMarkup(cleaned, postContent, themeDir, nextSeen, depth + 1);
+            return expandTemplateMarkup(cleaned, postContent, themeDir, nextSeen, depth + 1, options);
           }
         }
         return '';
@@ -1222,14 +1400,16 @@ function expandTemplateMarkup(
     },
   );
 
-  markup = markup.replace(
-    /<!--\s*wp:post-content(?:\s+\{[^}]*\})?\s*\/-->/gi,
-    postContent,
-  );
-  markup = markup.replace(
-    /<!--\s*wp:page-content(?:\s+\{[^}]*\})?\s*\/-->/gi,
-    postContent,
-  );
+  if (!options.preserveContentSlots) {
+    markup = markup.replace(
+      /<!--\s*wp:post-content(?:\s+\{[^}]*\})?\s*\/-->/gi,
+      postContent,
+    );
+    markup = markup.replace(
+      /<!--\s*wp:page-content(?:\s+\{[^}]*\})?\s*\/-->/gi,
+      postContent,
+    );
+  }
 
   return markup;
 }
@@ -1272,16 +1452,51 @@ export function resolveRuntimePageMarkupFromRow(row: any): string {
   return postContent;
 }
 
+function resolveRuntimeTemplateShellMarkupFromRow(row: any): string {
+  const themeDir = process.env.THEME_DIR?.trim();
+  const postContent = String(row.post_content ?? '');
+  if (!themeDir) return postContent;
+
+  for (const fileName of buildRuntimeTemplateCandidates(row)) {
+    const templatePath = join(themeDir, 'templates', fileName);
+    if (existsSync(templatePath)) {
+      try {
+        const templateMarkup = readFileSync(templatePath, 'utf-8');
+        const resolved = expandTemplateMarkup(
+          templateMarkup,
+          postContent,
+          themeDir,
+          new Set(),
+          0,
+          { preserveContentSlots: true },
+        );
+        if (resolved.trim()) return resolved;
+      } catch {
+        // fall through to next candidate
+      }
+    }
+  }
+
+  return postContent;
+}
+
 export function buildRuntimePlanFromPageRow(row: any) {
   const themeSlug = inferRuntimeThemeSlug(process.env.THEME_DIR);
+  const themeDir = process.env.THEME_DIR?.trim();
+  const themeTokens = readRuntimeThemeTokens(themeDir);
   const normalizedTemplate = normalizeRuntimeTemplateSlug(row?.template);
   const resolvedTemplate =
     normalizedTemplate ||
     (Number(row?.is_front_page ?? 0) === 1 ? 'front-page' : 'default');
-  const markup = resolveRuntimePageMarkupFromRow(row);
+  const markup = resolveRuntimeTemplateShellMarkupFromRow(row);
+  const contentMarkup = String(row.post_content ?? '');
   const blocks = parseRuntimeBlocks(markup);
+  const contentBlocks = parseRuntimeBlocks(contentMarkup);
   const blockTree = blocks.map((block, index) =>
     buildRuntimeBlockNode(block, `root.${index + 1}`),
+  );
+  const contentBlockTree = contentBlocks.map((block, index) =>
+    buildRuntimeBlockNode(block, `content.${index + 1}`),
   );
   const runtimeSignals = collectRuntimeSectionsAndBindings(blocks, {
     preserveSourceStructuralBlocks: shouldPreserveSourceStructuralBlocks(
@@ -1303,6 +1518,8 @@ export function buildRuntimePlanFromPageRow(row: any) {
         ? 'best-effort'
         : 'strict-structure',
     layoutFamily: deriveRuntimeLayoutFamily(row, themeSlug),
+    themeTokens,
+    layoutPolicy: buildRuntimeLayoutPolicy(themeTokens, themeSlug),
     source: {
       kind: 'page-post-content',
       template: resolvedTemplate,
@@ -1310,7 +1527,7 @@ export function buildRuntimePlanFromPageRow(row: any) {
       templateExpanded: Boolean(process.env.THEME_DIR?.trim()),
       sourceSummary:
         blockTree.length > 0
-          ? `runtime block tree with ${blockTree.length} root node(s)`
+          ? `runtime template block tree with ${blockTree.length} root node(s) and content block tree with ${contentBlockTree.length} root node(s)`
           : 'page-content fallback',
     },
     support: {
@@ -1320,6 +1537,7 @@ export function buildRuntimePlanFromPageRow(row: any) {
     dataNeeds: ['page-detail'],
     sections: runtimeSignals.sections,
     blockTree,
+    contentBlockTree,
     subtreeBindings: runtimeSignals.bindings,
   };
 }

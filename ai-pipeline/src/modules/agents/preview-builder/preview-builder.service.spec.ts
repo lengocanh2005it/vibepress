@@ -28,6 +28,16 @@ describe('PreviewBuilderService', () => {
     expect(normalized).not.toContain('/ className="vp-generated-image">');
   });
 
+  it('resolves server theme dir to an absolute path for runtime env files', () => {
+    const resolved = (service as any).resolveServerThemeDir(
+      'temp\\repos\\job-123\\themes\\profolio-fse',
+    );
+
+    expect(resolved).toBe(
+      join(process.cwd(), 'temp', 'repos', 'job-123', 'themes', 'profolio-fse'),
+    );
+  });
+
   it('does not add fallback underline classes to source-styled header navigation links', () => {
     const code = `
       import { Link } from 'react-router-dom';
@@ -113,6 +123,7 @@ describe('PreviewBuilderService', () => {
     expect(resolveRoute('RuntimePage', '/page/:slug')).toBe('/page/:slug');
     expect(resolveRoute('Page', '/page/:slug')).toBe('/page/:slug');
     expect(resolveRoute('Single', '/post/:slug')).toBe('/post/:slug');
+    expect(resolveRoute('SinglePost', '/post/:slug')).toBe('/post/:slug');
     expect(resolveRoute('Archive', '/archive')).toBe('/archive');
     expect(resolveRoute('Archive', '/category/:slug')).toBe('/category/:slug');
     expect(resolveRoute('Archive', '/author/:slug')).toBe('/author/:slug');
@@ -152,9 +163,7 @@ describe('PreviewBuilderService', () => {
       });
 
       const nextCss = await readFile(join(srcDir, 'index.css'), 'utf-8');
-      expect(nextCss).toContain(
-        '--wp--style--global--content-size: 1200px;',
-      );
+      expect(nextCss).toContain('--wp--style--global--content-size: 1200px;');
       expect(nextCss).toContain('--wp--style--global--wide-size: 1200px;');
     } finally {
       await rm(rootDir, { recursive: true, force: true });
@@ -309,6 +318,12 @@ describe('PreviewBuilderService', () => {
       );
       expect(bundledCss).toContain('width: 100vw;');
       expect(bundledCss).toContain('margin-left: calc(50% - 50vw);');
+      expect(bundledCss).toContain(
+        '.wp-site-blocks .profolio-fse-banner-wrapper > div[class*="max-w-"][class*="1200px"]',
+      );
+      expect(bundledCss).toContain(
+        'padding-left: min(6.5rem, 8vw) !important;',
+      );
     } finally {
       await rm(rootDir, { recursive: true, force: true });
     }

@@ -13,12 +13,21 @@ export const SOURCE_MOTION_BRIDGE_CSS = String.raw`@layer components {
   }
 
   header.wp-site-blocks:has(#sticky-header) {
+    position: sticky !important;
+    top: 0 !important;
+    z-index: 999 !important;
     width: 100vw !important;
     max-width: 100vw !important;
     margin-left: calc(50% - 50vw) !important;
     margin-right: calc(50% - 50vw) !important;
     padding-left: 0 !important;
     padding-right: 0 !important;
+  }
+
+  header.wp-site-blocks:has(> #sticky-header) > #sticky-header {
+    position: relative !important;
+    top: auto !important;
+    z-index: auto !important;
   }
 
   @media (max-width: 780px) {
@@ -217,6 +226,42 @@ export const SOURCE_MOTION_BRIDGE_CSS = String.raw`@layer components {
     margin-right: auto;
   }
 
+  @media (max-width: 780px) {
+    footer .pg-footer-center-row > .wp-block-columns {
+      display: flex !important;
+      flex-direction: column !important;
+      flex-wrap: nowrap !important;
+      row-gap: var(--wp--preset--spacing--30, 2rem) !important;
+      padding-top: 56px !important;
+      padding-bottom: 56px !important;
+    }
+
+    footer .pg-footer-center-row > .wp-block-columns > .wp-block-column {
+      flex-basis: 100% !important;
+      flex-grow: 1 !important;
+      flex-shrink: 1 !important;
+      width: 100% !important;
+      max-width: 100% !important;
+    }
+
+    footer .pg-footer-center-row .wp-block-heading[style*="48px"] {
+      font-size: clamp(2rem, 12vw, 3rem) !important;
+      line-height: 1.05 !important;
+    }
+
+    footer .pg-footer-center-row .wp-block-column:last-child > .wp-block-group {
+      padding: 28px !important;
+    }
+
+    footer .has-base-2-background-color > .wp-block-group {
+      flex-direction: column !important;
+      align-items: center !important;
+      justify-content: center !important;
+      gap: 0.5rem !important;
+      text-align: center !important;
+    }
+  }
+
   footer .wp-block-social-links,
   footer .wp-block-social-links li,
   footer .wp-block-social-links a {
@@ -301,8 +346,22 @@ export const SOURCE_MOTION_BRIDGE_CSS = String.raw`@layer components {
     padding: 0 !important;
   }
 
+  .profolio-fse-banner-wrapper {
+    width: 100vw !important;
+    max-width: 100vw !important;
+    margin-left: calc(50% - 50vw) !important;
+    margin-right: calc(50% - 50vw) !important;
+    box-sizing: border-box;
+  }
+
   .profolio-fse-banner-wrapper .wp-block-social-links {
     display: none !important;
+  }
+
+  .wp-site-blocks .profolio-fse-banner-wrapper > div[class*="max-w-"][class*="1200px"] {
+    padding-left: min(6.5rem, 8vw) !important;
+    padding-right: min(6.5rem, 8vw) !important;
+    box-sizing: border-box;
   }
 
   .profolio-fse-banner-wrapper .wp-block-button__link,
@@ -315,12 +374,24 @@ export const SOURCE_MOTION_BRIDGE_CSS = String.raw`@layer components {
     transition: all 0.3s !important;
   }
 
+  .profolio-fse-banner-wrapper .vp-generated-button *,
+  .profolio-fse-banner-wrapper .wp-block-button__link * {
+    color: #f2f2f2 !important;
+  }
+
   .profolio-fse-banner-wrapper .wp-block-button__link:hover,
   .profolio-fse-banner-wrapper .wp-block-button__link:focus,
   .profolio-fse-banner-wrapper .vp-generated-button:hover,
   .profolio-fse-banner-wrapper .vp-generated-button:focus {
     background-color: #f58931 !important;
     border-color: #f58931 !important;
+    color: #f2f2f2 !important;
+  }
+
+  .profolio-fse-banner-wrapper .vp-generated-button:hover *,
+  .profolio-fse-banner-wrapper .vp-generated-button:focus *,
+  .profolio-fse-banner-wrapper .wp-block-button__link:hover *,
+  .profolio-fse-banner-wrapper .wp-block-button__link:focus * {
     color: #f2f2f2 !important;
   }
 
@@ -462,7 +533,45 @@ export const SOURCE_MOTION_BRIDGE_CSS = String.raw`@layer components {
   }
 
   .profolio-fse-services-wrapper .wp-block-button__link:not(.is-style-outline),
-  .profolio-fse-services-wrapper .wp-element-button:not(.is-style-outline) {
+  .profolio-fse-services-wrapper .wp-element-button:not(.is-style-outline),
+  .profolio-fse-services-wrapper .vp-generated-button:not(.is-style-outline) {
+    background-color: #F5B731 !important;
+    border-color: #F5B731 !important;
+    color: #f2f2f2 !important;
+    transition: all 0.3s !important;
+  }
+
+  .profolio-fse-services-wrapper .wp-block-button__link:not(.is-style-outline):hover,
+  .profolio-fse-services-wrapper .wp-block-button__link:not(.is-style-outline):focus,
+  .profolio-fse-services-wrapper .wp-element-button:not(.is-style-outline):hover,
+  .profolio-fse-services-wrapper .wp-element-button:not(.is-style-outline):focus,
+  .profolio-fse-services-wrapper .vp-generated-button:not(.is-style-outline):hover,
+  .profolio-fse-services-wrapper .vp-generated-button:not(.is-style-outline):focus {
+    background-color: #f58931 !important;
+    border-color: #f58931 !important;
+    color: #f2f2f2 !important;
+  }
+
+  .profolio-fse-services-wrapper .wp-block-button.is-style-outline .wp-block-button__link,
+  .profolio-fse-services-wrapper .wp-block-button__link.is-style-outline,
+  .profolio-fse-services-wrapper .wp-element-button.is-style-outline,
+  .profolio-fse-services-wrapper .vp-generated-button.is-style-outline {
+    background-color: transparent !important;
+    border-color: #2F4138 !important;
+    color: #2F4138 !important;
+    transition: all 0.3s !important;
+  }
+
+  .profolio-fse-services-wrapper .wp-block-button.is-style-outline .wp-block-button__link:hover,
+  .profolio-fse-services-wrapper .wp-block-button.is-style-outline .wp-block-button__link:focus,
+  .profolio-fse-services-wrapper .wp-block-button__link.is-style-outline:hover,
+  .profolio-fse-services-wrapper .wp-block-button__link.is-style-outline:focus,
+  .profolio-fse-services-wrapper .wp-element-button.is-style-outline:hover,
+  .profolio-fse-services-wrapper .wp-element-button.is-style-outline:focus,
+  .profolio-fse-services-wrapper .vp-generated-button.is-style-outline:hover,
+  .profolio-fse-services-wrapper .vp-generated-button.is-style-outline:focus {
+    background-color: #f58931 !important;
+    border-color: #f58931 !important;
     color: #f2f2f2 !important;
   }
 
@@ -512,6 +621,17 @@ export const SOURCE_MOTION_BRIDGE_CSS = String.raw`@layer components {
   .profolio-fse-experience-image > :first-child:not(img),
   main.wp-site-blocks > .r-pad.has-secondary-background-color .r-cover > :first-child:not(img),
   .wp-site-blocks > .r-pad.has-secondary-background-color .r-cover > :first-child:not(img) {
+    opacity: 0 !important;
+    background-color: transparent !important;
+    pointer-events: none;
+  }
+
+  .profolio-fse-experience-image > div[style*="background-color"],
+  .profolio-fse-experience-image > span[class*="has-background-dim"],
+  main.wp-site-blocks > .r-pad.has-secondary-background-color .r-cover > div[style*="background-color"],
+  main.wp-site-blocks > .r-pad.has-secondary-background-color .r-cover > span[class*="has-background-dim"],
+  .wp-site-blocks > .r-pad.has-secondary-background-color .r-cover > div[style*="background-color"],
+  .wp-site-blocks > .r-pad.has-secondary-background-color .r-cover > span[class*="has-background-dim"] {
     opacity: 0 !important;
     background-color: transparent !important;
     pointer-events: none;

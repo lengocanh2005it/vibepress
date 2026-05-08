@@ -1449,12 +1449,11 @@ const SplitView: React.FC = () => {
     setShowSkipVisualCompareConfirm(false);
   };
 
-  const handleDeletePipeline = async () => {
+  const handleStopPipeline = async () => {
     setDeleteState({ loading: true, done: false });
     try {
-      await fetch(`/ai-api/pipeline/delete/${jobId}`, { method: "POST" });
-      sse.disconnect();
-      setDeleteState({ loading: false, done: true });
+      await fetch(`/ai-api/pipeline/stop/${jobId}`, { method: "POST" });
+      setDeleteState({ loading: false, done: false });
       setShowStopConfirm(false);
     } catch {
       setDeleteState({ loading: false, done: false });
@@ -2564,8 +2563,8 @@ const SplitView: React.FC = () => {
                   Dừng pipeline hiện tại?
                 </h2>
                 <p className="mt-1 text-sm text-on-surface-variant">
-                  Tất cả tiến trình đang chạy sẽ bị dừng và preview/artifacts
-                  hiện tại sẽ bị xóa.
+                  Workflow đang chạy sẽ nhận yêu cầu dừng và backend sẽ halt ở
+                  checkpoint an toàn gần nhất.
                 </p>
               </div>
             </div>
@@ -2583,7 +2582,7 @@ const SplitView: React.FC = () => {
                 Hủy
               </button>
               <button
-                onClick={handleDeletePipeline}
+                onClick={handleStopPipeline}
                 disabled={deleteState.loading}
                 className="inline-flex items-center gap-2 rounded-xl border border-red-700 bg-red-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
               >

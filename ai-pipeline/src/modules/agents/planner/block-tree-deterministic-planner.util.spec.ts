@@ -802,6 +802,14 @@ describe('block-tree canonical profolio pages', () => {
         isDetail: false,
       },
       {
+        templateName: '404',
+        componentName: 'NotFound',
+        type: 'page' as const,
+        route: '*',
+        dataNeeds: [],
+        isDetail: false,
+      },
+      {
         templateName: 'template-about',
         componentName: 'TemplateAbout',
         type: 'page' as const,
@@ -940,9 +948,47 @@ describe('block-tree canonical profolio pages', () => {
               kind: 'post-template',
               blockName: 'post-template',
               customClassNames: ['products-block-post-template'],
+              attrs: {
+                layout: { type: 'grid', minimumColumnWidth: '20rem' },
+              },
               children: [
-                { kind: 'post-title', blockName: 'post-title' },
-                { kind: 'post-excerpt', blockName: 'post-excerpt' },
+                {
+                  kind: 'group',
+                  blockName: 'group',
+                  borderRadius: '10px',
+                  attrs: {
+                    style: {
+                      border: { color: '#e0e0e0', width: '1px' },
+                    },
+                  },
+                  children: [
+                    {
+                      kind: 'post-featured-image',
+                      blockName: 'post-featured-image',
+                      borderRadius: '10px',
+                    },
+                    {
+                      kind: 'group',
+                      blockName: 'group',
+                      padding: {
+                        top: 'var(--wp--preset--spacing--10)',
+                        right: 'var(--wp--preset--spacing--10)',
+                        bottom: 'var(--wp--preset--spacing--20)',
+                        left: 'var(--wp--preset--spacing--10)',
+                      },
+                      children: [
+                        { kind: 'post-author', blockName: 'post-author' },
+                        { kind: 'post-date', blockName: 'post-date' },
+                        { kind: 'post-title', blockName: 'post-title' },
+                        {
+                          kind: 'post-excerpt',
+                          blockName: 'post-excerpt',
+                          attrs: { moreText: 'Read More', excerptLength: 16 },
+                        },
+                      ],
+                    },
+                  ],
+                },
               ],
             },
           ],
@@ -957,6 +1003,17 @@ describe('block-tree canonical profolio pages', () => {
       expect.objectContaining({
         type: 'post-list',
         title: 'Latest Posts',
+        layout: 'grid-2',
+        authorIcon: 'user',
+        dateIcon: 'calendar',
+        showReadMore: true,
+        readMoreLabel: 'Read More',
+        cardStyle: {
+          borderRadius: '10px',
+          border: '1px solid #e0e0e0',
+        },
+        contentPaddingStyle:
+          'var(--wp--preset--spacing--10) var(--wp--preset--spacing--10) var(--wp--preset--spacing--20) var(--wp--preset--spacing--10)',
         customClassNames: ['products-block-post-template'],
       }),
     ]);
@@ -1339,29 +1396,97 @@ describe('block-tree deterministic post detail terms', () => {
             {
               kind: 'group',
               blockName: 'group',
+              bgColor: '#F4F4F4',
+              borderRadius: '10px',
+              padding: {
+                top: '1rem',
+                right: '20px',
+                bottom: '1rem',
+                left: '20px',
+              },
               children: [{ kind: 'search', blockName: 'search' }],
             },
             {
               kind: 'group',
               blockName: 'group',
+              bgColor: '#F4F4F4',
+              borderRadius: '10px',
+              padding: {
+                top: '1rem',
+                right: '20px',
+                bottom: '1rem',
+                left: '20px',
+              },
               children: [
-                { kind: 'heading', blockName: 'heading', text: 'Latest Posts' },
-                { kind: 'latest-posts', blockName: 'latest-posts' },
+                {
+                  kind: 'heading',
+                  blockName: 'heading',
+                  text: 'Latest Posts',
+                  level: 4,
+                  typography: { fontWeight: '700' },
+                },
+                {
+                  kind: 'latest-posts',
+                  blockName: 'latest-posts',
+                  attrs: {
+                    postsToShow: 5,
+                    displayFeaturedImage: true,
+                    featuredImageAlign: 'left',
+                    featuredImageSizeWidth: 75,
+                    featuredImageSizeHeight: 75,
+                    excerptLength: 11,
+                  },
+                  typography: {
+                    fontSize: '18px',
+                    fontWeight: '600',
+                  },
+                },
               ],
             },
             {
               kind: 'group',
               blockName: 'group',
+              bgColor: '#F4F4F4',
+              borderRadius: '10px',
+              padding: {
+                top: '1rem',
+                right: '20px',
+                bottom: '1rem',
+                left: '20px',
+              },
               children: [
-                { kind: 'heading', blockName: 'heading', text: 'Categories' },
-                { kind: 'categories', blockName: 'categories' },
+                {
+                  kind: 'heading',
+                  blockName: 'heading',
+                  text: 'Categories',
+                  level: 4,
+                  typography: { fontWeight: '700' },
+                },
+                {
+                  kind: 'categories',
+                  blockName: 'categories',
+                },
               ],
             },
             {
               kind: 'group',
               blockName: 'group',
+              bgColor: '#F4F4F4',
+              borderRadius: '10px',
+              padding: {
+                top: '1rem',
+                right: '20px',
+                bottom: '1rem',
+                left: '20px',
+              },
               children: [
-                { kind: 'heading', blockName: 'heading', text: 'Tags' },
+                {
+                  kind: 'heading',
+                  blockName: 'heading',
+                  text: 'Tags',
+                  level: 4,
+                  typography: { fontWeight: '700' },
+                },
                 { kind: 'tag-cloud', blockName: 'tag-cloud' },
               ],
             },
@@ -1371,20 +1496,102 @@ describe('block-tree deterministic post detail terms', () => {
     });
 
     expect(plan?.sections.map((section) => section.type)).toEqual([
+      'cover',
       'post-title',
       'post-content',
       'sidebar',
     ]);
+    expect(plan?.sections[0]).toMatchObject({
+      type: 'cover',
+      headingBinding: 'detail-title',
+    });
     expect(plan?.sections[2]).toMatchObject({
+      type: 'post-content',
+    });
+    expect(plan?.sections[3]).toMatchObject({
       type: 'sidebar',
+      widgetLayout: 'stacked-cards',
       widgets: [
-        { kind: 'search' },
-        { kind: 'recent-posts', title: 'Latest Posts' },
+        {
+          kind: 'search',
+          cardStyle: { background: '#F4F4F4', borderRadius: '10px' },
+        },
+        {
+          kind: 'recent-posts',
+          title: 'Latest Posts',
+          titleLevel: 4,
+          maxItems: 5,
+          displayFeaturedImage: true,
+          featuredImageAlign: 'left',
+          featuredImageSizeWidth: 75,
+          featuredImageSizeHeight: 75,
+          excerptLength: 11,
+          cardStyle: { background: '#F4F4F4', borderRadius: '10px' },
+        },
         { kind: 'categories', title: 'Categories' },
         { kind: 'tags', title: 'Tags' },
       ],
     });
     expect(plan?.layout.contentLayout).toBe('sidebar-right');
     expect(plan?.layout.sidebarScope).toBe('all-content');
+    expect(plan?.layout.includes).toContain('Sidebar');
+  });
+
+  it('synthesizes a lead cover with bound detail title for single-page patterns', () => {
+    const plan = buildBlockTreeDrivenVisualPlanForComponent({
+      ...detailBaseInput,
+      content: {
+        ...detailBaseInput.content,
+        pages: [{ id: 1, slug: 'sample-page', content: '<p>Sample page</p>' }],
+      } as any,
+      buildBoundPageContentFallbackSection: (
+        _componentPlan: any,
+        _content: any,
+        showTitle: boolean,
+      ) => ({
+        type: 'page-content' as const,
+        showTitle,
+      }),
+      componentPlan: {
+        templateName: 'page',
+        componentName: 'RuntimePage',
+        type: 'page' as const,
+        route: '/page/:slug',
+        dataNeeds: ['page-detail'],
+        isDetail: true,
+        fixedSlug: 'sample-page',
+      },
+      draftSections: [],
+      draftBlockTree: [
+        {
+          kind: 'cover',
+          blockName: 'cover',
+          src: 'theme-asset:/assets/images/banner.jpg',
+          minHeight: '232px',
+          overlayColor: '#000000',
+          attrs: { dimRatio: 90 },
+          children: [{ kind: 'post-title', blockName: 'post-title', level: 1 }],
+        },
+        {
+          kind: 'group',
+          blockName: 'group',
+          children: [{ kind: 'post-content', blockName: 'post-content' }],
+        },
+      ] as BlockNode[],
+    });
+
+    expect(plan?.sections).toMatchObject([
+      {
+        type: 'cover',
+        imageSrc: 'theme-asset:/assets/images/banner.jpg',
+        headingBinding: 'detail-title',
+        dimRatio: 90,
+        minHeight: '232px',
+      },
+      {
+        type: 'page-content',
+        showTitle: false,
+      },
+    ]);
   });
 });

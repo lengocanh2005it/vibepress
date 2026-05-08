@@ -1,4 +1,5 @@
 export const PROFOLIO_FSE_AI_LOCKED_VISUAL_PLAN_TEMPLATES = new Set([
+  '404',
   'front-page',
   'template-about',
   'template-contact',
@@ -7,13 +8,13 @@ export const PROFOLIO_FSE_AI_LOCKED_VISUAL_PLAN_TEMPLATES = new Set([
 
 export const PROFOLIO_FSE_AI_LOCKED_VISUAL_PLAN_COMPONENTS = new Set([
   'frontpage',
+  'notfound',
   'templateabout',
   'templatecontact',
   'templateservices',
 ]);
 
 export const PROFOLIO_FSE_DETERMINISTIC_STRUCTURE_TEMPLATES = new Set([
-  '404',
   'archive',
   'archive-product',
   'blog-left-sidebar',
@@ -27,7 +28,6 @@ export const PROFOLIO_FSE_DETERMINISTIC_STRUCTURE_TEMPLATES = new Set([
 ]);
 
 export const PROFOLIO_FSE_DETERMINISTIC_STRUCTURE_COMPONENTS = new Set([
-  'notfound',
   'archive',
   'archiveproduct',
   'blogleftsidebar',

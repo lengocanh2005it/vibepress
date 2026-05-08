@@ -219,6 +219,62 @@ describe('PlannerService shared chrome visual plans', () => {
     expect(enriched[0]?.dataNeeds).toEqual(['product-detail', 'products']);
   });
 
+  it('enriches profolio single-page detail routes with posts when the sidebar source-chain includes latest-posts', () => {
+    const enriched = (service as any).enrichPlan(
+      [
+        {
+          templateName: 'single-page',
+          componentName: 'RuntimePage',
+          type: 'page',
+          route: '/page/:slug',
+          dataNeeds: [],
+          isDetail: true,
+          description: 'Page detail',
+        },
+      ],
+      new Map<string, string>([
+        [
+          'single-page',
+          '<!-- wp:pattern {"slug":"profolio-fse/single-page"} /-->',
+        ],
+      ]),
+      {
+        siteInfo: { activeTheme: 'profolio-fse' },
+        themeResolvedContent: { themeSlug: 'profolio-fse' },
+      },
+      {
+        themeJsonSummary: { templatePartAreas: [] },
+        structureHints: {
+          entrySourceChains: [
+            {
+              entryFile: 'patterns/single-page.php',
+              routeHint: 'single-page',
+              chainFiles: [
+                'templates/page.html',
+                'patterns/single-page.php',
+                'patterns/sidebar.php',
+              ],
+              composedSource:
+                '<!-- wp:cover /--><!-- wp:post-content /--><!-- wp:template-part {"slug":"sidebar"} /--><!-- wp:latest-posts /-->',
+              assetFiles: [],
+              runtimeFiles: [],
+              blockTypes: [
+                'core/cover',
+                'core/post-content',
+                'core/template-part',
+                'core/latest-posts',
+              ],
+              headingTexts: ['Latest Posts'],
+              notes: ['Nested pattern expansion: profolio-fse/sidebar'],
+            },
+          ],
+        },
+      },
+    );
+
+    expect(enriched[0]?.dataNeeds).toEqual(['page-detail', 'posts']);
+  });
+
   it('enriches profolio marketing template posts only when the source-chain contains a query pattern', () => {
     const enriched = (service as any).enrichPlan(
       [
