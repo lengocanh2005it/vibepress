@@ -553,7 +553,9 @@ export class CodeGeneratorService {
     lines.push('  return (');
     const rootClass =
       renderState.componentKind === 'header'
-        ? 'wp-site-blocks w-full relative'
+        ? fragment.includes('id="sticky-header"')
+          ? 'wp-site-blocks w-full sticky top-0 z-[999]'
+          : 'wp-site-blocks w-full relative'
         : 'wp-site-blocks w-full';
     lines.push(`    <${rootTag} className="${rootClass}">`);
     if (fragment) lines.push(fragment);
@@ -588,7 +590,12 @@ export class CodeGeneratorService {
           needs.add(section.resource === 'products' ? 'products' : 'posts');
           break;
         case 'search':
-          needs.add('posts');
+          if (
+            section.obligation?.required?.includes('posts') === true ||
+            plan.dataNeeds.includes('posts')
+          ) {
+            needs.add('posts');
+          }
           break;
         case 'post-content':
         case 'comments':
@@ -736,7 +743,9 @@ export class CodeGeneratorService {
     const importedPartials = [
       ...new Set([
         ...plan.layout.includes,
-        ...this.collectBlockTreeTemplatePartComponentNames(plan.blockTree ?? []),
+        ...this.collectBlockTreeTemplatePartComponentNames(
+          plan.blockTree ?? [],
+        ),
       ]),
     ];
     for (const name of importedPartials) {
@@ -981,7 +990,7 @@ export class CodeGeneratorService {
     );
     lines.push(`    if (!value) return undefined;`);
     lines.push(
-      `    const allowed = new Set(['backgroundColor', 'color', 'fontStyle', 'fontWeight', 'textDecoration', 'borderRadius', 'borderTopLeftRadius', 'borderTopRightRadius', 'borderBottomRightRadius', 'borderBottomLeftRadius', 'border', 'borderColor', 'borderWidth', 'borderStyle', 'width', 'height', 'maxWidth', 'aspectRatio', 'objectFit', 'objectPosition', 'display', 'margin', 'marginTop', 'marginRight', 'marginBottom', 'marginLeft']);`,
+      `    const allowed = new Set(['backgroundColor', 'color', 'fontStyle', 'fontWeight', 'fontSize', 'fontFamily', 'lineHeight', 'letterSpacing', 'textAlign', 'textDecoration', 'textTransform', 'borderRadius', 'borderTopLeftRadius', 'borderTopRightRadius', 'borderBottomRightRadius', 'borderBottomLeftRadius', 'border', 'borderColor', 'borderWidth', 'borderStyle', 'width', 'minWidth', 'maxWidth', 'height', 'minHeight', 'maxHeight', 'aspectRatio', 'objectFit', 'objectPosition', 'display', 'alignItems', 'alignSelf', 'justifyContent', 'flexBasis', 'flexDirection', 'flexWrap', 'gap', 'rowGap', 'columnGap', 'padding', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft', 'margin', 'marginTop', 'marginRight', 'marginBottom', 'marginLeft']);`,
     );
     lines.push(`    const style: React.CSSProperties = {};`);
     lines.push(`    value.split(';').forEach((entry) => {`);
@@ -1238,7 +1247,7 @@ export class CodeGeneratorService {
       );
       lines.push(`    if (!value) return undefined;`);
       lines.push(
-        `    const allowed = new Set(['backgroundColor', 'color', 'fontStyle', 'fontWeight', 'textDecoration', 'borderRadius', 'borderTopLeftRadius', 'borderTopRightRadius', 'borderBottomRightRadius', 'borderBottomLeftRadius', 'border', 'borderColor', 'borderWidth', 'borderStyle', 'width', 'height', 'maxWidth', 'aspectRatio', 'objectFit', 'objectPosition', 'display', 'margin', 'marginTop', 'marginRight', 'marginBottom', 'marginLeft']);`,
+        `    const allowed = new Set(['backgroundColor', 'color', 'fontStyle', 'fontWeight', 'fontSize', 'fontFamily', 'lineHeight', 'letterSpacing', 'textAlign', 'textDecoration', 'textTransform', 'borderRadius', 'borderTopLeftRadius', 'borderTopRightRadius', 'borderBottomRightRadius', 'borderBottomLeftRadius', 'border', 'borderColor', 'borderWidth', 'borderStyle', 'width', 'minWidth', 'maxWidth', 'height', 'minHeight', 'maxHeight', 'aspectRatio', 'objectFit', 'objectPosition', 'display', 'alignItems', 'alignSelf', 'justifyContent', 'flexBasis', 'flexDirection', 'flexWrap', 'gap', 'rowGap', 'columnGap', 'padding', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft', 'margin', 'marginTop', 'marginRight', 'marginBottom', 'marginLeft']);`,
       );
       lines.push(`    const style: React.CSSProperties = {};`);
       lines.push(`    value.split(';').forEach((entry) => {`);
@@ -2131,6 +2140,7 @@ export default ${componentName};`;
     ctx: RenderCtx,
   ): string {
     const { componentName, palette, sections } = plan;
+    const useSharedSidebarComponent = this.usesSharedSidebarComponent(plan);
     const sidebarSectionIndex =
       plan.layout.contentLayout && plan.layout.contentLayout !== 'single-column'
         ? sections.findIndex((section) => section.type === 'sidebar')
@@ -2175,8 +2185,9 @@ export default ${componentName};`;
         }
         if (hasSidebarLayout && index === mainContentSectionIndex) {
           const mainPlaceholder = this.buildSectionAssemblyPlaceholder(index);
-          const sidebarPlaceholder =
-            this.buildSectionAssemblyPlaceholder(sidebarSectionIndex);
+          const sidebarPlaceholder = useSharedSidebarComponent
+            ? '<Sidebar />'
+            : this.buildSectionAssemblyPlaceholder(sidebarSectionIndex);
           return `      <section className="bg-[${wrapperBg}] ${wrapperPy} w-full"${wrapperSectionStyle}>
         <div className="${ctx.l.containerClass}">
           <div className="grid grid-cols-1 gap-8 lg:items-start lg:grid-cols-[1fr]"${gridStyle}>
@@ -2491,6 +2502,14 @@ export default ${componentName};`;
       : '';
     const styleAttr = this.blockNodeStyleAttr(node);
 
+    if (
+      plan &&
+      this.usesSharedSidebarComponent(plan) &&
+      this.isStandaloneSharedSidebarBlockNode(node)
+    ) {
+      return '';
+    }
+
     switch (node.kind) {
       case 'group': {
         const styleAttr = this.blockNodeStyleAttr(
@@ -2506,7 +2525,7 @@ export default ${componentName};`;
       }
 
       case 'cover':
-        return `${indent}<${tagName}${this.blockNodeClassAttr(node)}${this.buildBlockTreeCoverStyleAttr(node)}>${children}</${tagName}>`;
+        return this.renderBlockTreeCoverNode(node, tagName, children, indent);
 
       case 'columns': {
         const columnsStyle = this.blockNodeStyleAttr(node, {
@@ -2548,10 +2567,18 @@ export default ${componentName};`;
         return this.renderBlockTreeNavigationLink(node, depth);
 
       case 'button':
-        return `${indent}<a href="${node.href ?? '#'}"${this.blockNodeClassAttr(node, this.wpButtonLinkClasses())}${styleAttr}>${this.blockTreeTextLiteral(node.text)}</a>`;
+        return `${indent}<a href="${node.href ?? '#'}"${this.blockNodeClassAttr(node, this.wpButtonLinkClasses())}${this.mergeStyleAttrs(
+          this.buildBlockStyleAttr(
+            this.pickBlockStyle(ctx, 'button'),
+            {},
+            false,
+            ctx,
+          ),
+          styleAttr,
+        )}>${this.blockTreeTextLiteral(node.text)}</a>`;
 
       case 'search':
-        return this.renderBlockTreeSearch(node, depth);
+        return this.renderBlockTreeSearch(node, ctx, depth);
 
       case 'avatar':
         return this.renderBlockTreeAvatar(node, depth);
@@ -2584,7 +2611,7 @@ export default ${componentName};`;
         return `${indent}{item?.featuredImage ? <img src={item.featuredImage} alt={item.title ?? ''}${this.blockNodeClassAttr(node, ['post-featured-image'])}${styleAttr} /> : null}`;
 
       case 'post-content':
-        return `${indent}{item ? <div${this.blockNodeClassAttr(node, ['post-content'])}${styleAttr}>{renderRichTextChildren(item.content, "post-content")}</div> : null}`;
+        return `${indent}{item ? <div${this.blockNodeClassAttr(node, this.blockTreeRichContentClassNames('post-content'))}${styleAttr}>{renderRichTextChildren(item.content, "post-content")}</div> : null}`;
 
       case 'post-excerpt':
         return `${indent}<p${this.blockNodeClassAttr(node, ['post-excerpt'])}${styleAttr}>{renderRichTextChildren(item?.excerpt ?? '', "post-excerpt")}</p>`;
@@ -2625,7 +2652,13 @@ ${indent}</div>`;
         return this.renderBlockTreePostCommentsForm(node, depth);
 
       case 'query-pagination':
-        return this.renderBlockTreeQueryPagination(node, ctx, componentName, plan, depth);
+        return this.renderBlockTreeQueryPagination(
+          node,
+          ctx,
+          componentName,
+          plan,
+          depth,
+        );
 
       case 'query-pagination-previous':
         return `${indent}<button type="button" onClick={() => updatePage(currentPage - 1)} disabled={currentPage <= 1}${this.blockNodeClassAttr(node)}${styleAttr}>${this.blockTreeTextLiteral(node.text, 'Previous')}</button>`;
@@ -2650,6 +2683,9 @@ ${indent}</div>`;
           const name = this.templatePartComponentName(node.templatePartSlug);
           return `${indent}<${name} />`;
         }
+        if (plan && this.usesSharedSidebarComponent(plan)) {
+          return `${indent}<Sidebar />`;
+        }
         return '';
 
       default:
@@ -2658,7 +2694,7 @@ ${indent}</div>`;
         }
         return node.text
           ? `${indent}<div${this.blockNodeClassAttr(node, [node.kind])}${styleAttr}>${this.blockTreeTextLiteral(node.text)}</div>`
-            : '';
+          : '';
     }
   }
 
@@ -2705,7 +2741,11 @@ ${indent}</div>`;
           );
         }
         if (child.kind === 'query-no-results') {
-          return this.renderBlockTreeQueryNoResults(child, depth + 1, collectionName);
+          return this.renderBlockTreeQueryNoResults(
+            child,
+            depth + 1,
+            collectionName,
+          );
         }
         return this.renderBlockNode(child, ctx, componentName, depth + 1, plan);
       })
@@ -3101,16 +3141,69 @@ ${indent}  )}
 ${indent}</li>`;
   }
 
-  private renderBlockTreeSearch(node: BlockNode, depth: number): string {
+  private renderBlockTreeSearch(
+    node: BlockNode,
+    ctx: RenderCtx,
+    depth: number,
+  ): string {
     const indent = '  '.repeat(depth + 3);
     const placeholder =
-      this.blockNodeStringAttr(node, 'placeholder') ?? 'Search...';
+      this.blockNodeStringAttr(node, 'placeholder') ??
+      (node.sourceRef?.templateName === '404' ? 'Find another ' : 'Search');
     const buttonText = this.blockNodeStringAttr(node, 'buttonText') ?? 'Search';
+    const buttonPosition = this.blockNodeStringAttr(node, 'buttonPosition');
+    const buttonInside = buttonPosition === 'button-inside';
+    const buttonUseIcon = this.blockNodeBooleanAttr(node, 'buttonUseIcon');
     const width = this.normalizeCssLength(
       this.blockNodeStringAttr(node, 'widthUnit') === '%'
         ? `${String(node.attrs?.width ?? '')}%`
         : this.blockNodeStringAttr(node, 'width'),
     );
+    const centerAlign =
+      node.align === 'center' || node.attrs?.align === 'center'
+        ? { marginLeft: 'auto', marginRight: 'auto' }
+        : {};
+    const buttonBackground =
+      typeof node.bgColor === 'string' && this.isCssColorValue(node.bgColor)
+        ? node.bgColor
+        : ctx.p.accent;
+    const buttonColor = ctx.p.accentText;
+    const inputStyle = this.buildStyleAttr({
+      minHeight: '50px',
+      width: '100%',
+      border: '1px solid rgba(0,0,0,0.12)',
+      borderRadius: ctx.t.buttonRadius.replace(/^rounded-\[|\]$/g, '') || '8px',
+      backgroundColor: '#ffffff',
+      color: ctx.p.text,
+      padding: buttonInside ? '0.75rem 4.75rem 0.75rem 1rem' : '0.75rem 1rem',
+      fontSize: '15px',
+      fontWeight: '400',
+    });
+    const buttonStyle = this.buildStyleAttr({
+      minHeight: '50px',
+      border: '0',
+      borderRadius: ctx.t.buttonRadius.replace(/^rounded-\[|\]$/g, '') || '8px',
+      backgroundColor: buttonBackground,
+      color: buttonColor,
+      padding: buttonInside ? '0 1.35rem' : '0.75rem 1.5rem',
+      fontSize: '15px',
+      fontWeight: '500',
+      textTransform: 'capitalize',
+    });
+    if (buttonInside) {
+      return `${indent}<form role="search"${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(
+        node,
+        {
+          position: 'relative',
+          width,
+          maxWidth: width,
+          ...centerAlign,
+        },
+      )}>
+${indent}  <input type="search" name="s" placeholder=${JSON.stringify(placeholder)} className="min-w-0"${inputStyle} />
+${indent}  <button type="submit" aria-label=${JSON.stringify(buttonText)} className="absolute inset-y-0 right-0 inline-flex items-center justify-center transition-opacity hover:opacity-90"${buttonStyle}>${buttonUseIcon ? `${this.renderSidebarSearchIcon()}` : buttonText}</button>
+${indent}</form>`;
+    }
     return `${indent}<form role="search"${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(
       node,
       {
@@ -3118,10 +3211,11 @@ ${indent}</li>`;
         alignItems: 'center',
         gap: node.gap ?? '0.5rem',
         width,
+        ...centerAlign,
       },
     )}>
-${indent}  <input type="search" placeholder=${JSON.stringify(placeholder)} className="min-w-0 flex-1 border border-black/20 bg-transparent px-3 py-2" />
-${indent}  <button type="submit" className="border border-black/20 px-4 py-2">${buttonText}</button>
+${indent}  <input type="search" name="s" placeholder=${JSON.stringify(placeholder)} className="min-w-0 flex-1"${inputStyle} />
+${indent}  <button type="submit" className="inline-flex items-center justify-center transition-opacity hover:opacity-90"${buttonStyle}>${buttonUseIcon ? `${this.renderSidebarSearchIcon()}` : buttonText}</button>
 ${indent}</form>`;
   }
 
@@ -3380,6 +3474,19 @@ ${indent}) : null}`;
     return node.attrs?.[key] === true;
   }
 
+  private blockNodeNumberAttr(
+    node: BlockNode,
+    key: string,
+  ): number | undefined {
+    const value = node.attrs?.[key];
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'string' && value.trim().length > 0) {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+    return undefined;
+  }
+
   private queryTitleMarkup(componentName: string): string {
     if (/^search$/i.test(componentName)) {
       return `{(() => {
@@ -3444,6 +3551,22 @@ ${indent}) : null}`;
       state.usedSectionIndexes,
     );
     if (
+      this.usesSharedSidebarComponent(plan) &&
+      this.isStandaloneSharedSidebarBlockNode(node)
+    ) {
+      if (matchedSection?.section.type === 'sidebar') {
+        state.usedSectionIndexes.add(matchedSection.index);
+      }
+      return '';
+    }
+    if (
+      matchedSection?.section.type === 'sidebar' &&
+      this.usesSharedSidebarComponent(plan)
+    ) {
+      state.usedSectionIndexes.add(matchedSection.index);
+      return '';
+    }
+    if (
       matchedSection &&
       !this.shouldPreserveHybridBlockTreeDescendants(
         node,
@@ -3472,7 +3595,7 @@ ${indent}) : null}`;
       case 'group':
         return `${indent}<${tagName}${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>${children}</${tagName}>`;
       case 'cover':
-        return `${indent}<${tagName}${this.blockNodeClassAttr(node)}${this.buildBlockTreeCoverStyleAttr(node)}>${children}</${tagName}>`;
+        return this.renderBlockTreeCoverNode(node, tagName, children, indent);
       case 'columns':
         return `${indent}<div${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(
           node,
@@ -3490,7 +3613,7 @@ ${indent}) : null}`;
           },
         )}>${children}</div>`;
       default:
-        return this.renderBlockNode(node, ctx, plan.componentName, depth);
+        return this.renderBlockNode(node, ctx, plan.componentName, depth, plan);
     }
   }
 
@@ -3741,9 +3864,14 @@ ${indent}) : null}`;
 
     const parentSourceNodeId = node.sourceRef?.parentSourceNodeId;
     const parent = parentSourceNodeId
-      ? this.findBlockNodeBySourceNodeId(plan?.blockTree ?? [], parentSourceNodeId)
+      ? this.findBlockNodeBySourceNodeId(
+          plan?.blockTree ?? [],
+          parentSourceNodeId,
+        )
       : null;
-    const parentLayout = parent?.attrs?.layout as Record<string, any> | undefined;
+    const parentLayout = parent?.attrs?.layout as
+      | Record<string, any>
+      | undefined;
     if (parentLayout?.type !== 'constrained') return {};
 
     const constrained = this.buildSourceConstrainedInnerStyle(ctx);
@@ -3839,6 +3967,7 @@ ${indent}) : null}`;
             (s): s is SidebarSection => s.type === 'sidebar',
           ) ?? null)
         : null;
+    const useSharedSidebarComponent = this.usesSharedSidebarComponent(plan);
     const allContentSidebarLayout =
       !!sidebarSection &&
       plan.layout.sidebarScope === 'all-content' &&
@@ -3859,6 +3988,7 @@ ${indent}) : null}`;
         ctx,
         plan.layout.contentLayout === 'sidebar-left',
         plan.componentName,
+        useSharedSidebarComponent,
       );
     }
 
@@ -3879,6 +4009,7 @@ ${indent}) : null}`;
             ctx,
             plan.layout.contentLayout === 'sidebar-left',
             plan.componentName,
+            useSharedSidebarComponent,
           ),
         );
         continue;
@@ -3994,6 +4125,50 @@ ${indent}) : null}`;
       node.src,
     )})}")\`, backgroundSize: 'cover', backgroundPosition: '${bgPosition}', backgroundRepeat: 'no-repeat'${bgAttachment} }}`;
     return this.mergeStyleAttrs(baseStyle, backgroundStyle);
+  }
+
+  private renderBlockTreeCoverNode(
+    node: BlockNode,
+    tagName: string,
+    children: string,
+    indent: string,
+  ): string {
+    const coverStyle = this.buildBlockTreeCoverStyleAttr(node);
+    if (!node.src) {
+      return `${indent}<${tagName}${this.blockNodeClassAttr(node)}${coverStyle}>${children}</${tagName}>`;
+    }
+
+    const dimRatio = this.blockNodeNumberAttr(node, 'dimRatio');
+    const overlayStyle = this.buildStyleAttr({
+      backgroundColor:
+        node.overlayColor ?? (dimRatio !== undefined ? '#000000' : undefined),
+      opacity:
+        dimRatio !== undefined
+          ? Math.max(0, Math.min(dimRatio, 100)) / 100
+          : undefined,
+    });
+
+    return `${indent}<${tagName}${this.blockNodeClassAttr(node)}${coverStyle}>
+${indent}  <span aria-hidden="true" className="wp-block-cover__background has-background-dim"${overlayStyle} />
+${indent}  <div className="wp-block-cover__inner-container">${children}
+${indent}  </div>
+${indent}</${tagName}>`;
+  }
+
+  private blockTreeRichContentClassNames(baseClassName: string): string[] {
+    return [
+      baseClassName,
+      'prose',
+      'max-w-none',
+      '[&_p]:leading-7',
+      '[&_li]:leading-7',
+      '[&_ul]:pl-6',
+      '[&_ol]:pl-6',
+      '[&_figure]:mx-0',
+      '[&_figure]:my-8',
+      '[&_img]:h-auto',
+      '[&_img]:max-w-full',
+    ];
   }
 
   // ── Section dispatcher ────────────────────────────────────────────────────
@@ -5060,6 +5235,12 @@ ${indent}) : null}`;
       s.subheadingCustomClassNames,
       presentation.textAlign,
     );
+    const headingMarkup =
+      s.headingBinding === 'detail-title'
+        ? `<h1 className="${coverHeadingClassName}"${headingStyle}>{item?.title}</h1>`
+        : s.heading
+          ? `<h1 className="${coverHeadingClassName}"${headingStyle}>${s.heading}</h1>`
+          : '';
 
     return `      {/* Cover */}
       <section${styleAttr}
@@ -5067,7 +5248,7 @@ ${indent}) : null}`;
       >
         <div className="absolute inset-0 bg-black" style={{ opacity: ${s.dimRatio / 100} }} />
         <div className="relative z-10 w-full flex flex-col ${this.presentationItemsAlignClass(presentation.itemsAlign)} ${this.presentationTextAlignClass(presentation.textAlign)} gap-4 px-4 sm:px-6 lg:px-8 py-16"${this.mergeStyleAttrs(this.buildSectionGapStyleAttr(s), this.presentationMaxWidthStyleAttr(presentation))}>
-          ${s.heading ? `<h1 className="${coverHeadingClassName}"${headingStyle}>${s.heading}</h1>` : ''}
+          ${headingMarkup}
           ${s.subheading ? `<p className="${coverSubheadingClassName}"${subheadingStyle}>${s.subheading}</p>` : ''}
           ${cta}
         </div>
@@ -5098,6 +5279,14 @@ ${indent}) : null}`;
       { baseColor: p.textMuted },
       this.pickBlockStyle(ctx, 'post-excerpt', 'paragraph'),
     );
+    const readMoreButtonStyle = s.readMoreButtonStyle
+      ? this.blueprintButtonStyleAttr(s.readMoreButtonStyle)
+      : this.buildStyleAttr({
+          background: p.accent,
+          color: p.accentText,
+          borderRadius: '8px',
+          padding: '0.75rem 1.25rem',
+        });
     const imageRadius =
       this.exactRadiusClass(s.imageRadius) || this.imageRadiusClass(ctx);
     const isGrid = s.layout !== 'list';
@@ -5153,6 +5342,15 @@ ${indent}) : null}`;
                 {post.buttonText || 'View product'}
               </Link>`
         : '';
+    const readMoreLabelLiteral = JSON.stringify(s.readMoreLabel ?? 'Read More');
+    const readMoreIconMarkup =
+      s.readMoreIcon === 'arrow-right' ? this.renderReadMoreArrowIcon() : '';
+    const readMoreMarkup = s.showReadMore
+      ? `              <Link to={\`${detailRouteBase}/\${post.slug}\`} className="inline-flex w-fit items-center gap-2 text-sm font-medium transition-opacity hover:opacity-90"${readMoreButtonStyle}>
+                {${readMoreLabelLiteral}}
+                ${readMoreIconMarkup}
+              </Link>`
+      : '';
     const titleMetaRow = hasMeta
       ? isEditorialList
         ? `              <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between md:gap-8"${titleMetaRowStyle}>
@@ -5184,16 +5382,17 @@ ${indent}) : null}`;
     const stackedContent = `              <Link to={\`${detailRouteBase}/\${post.slug}\`} className="${this.textLinkClass(tc, p.accent, 'text-lg font-medium')}"${titleStyle}>{post.title}</Link>
                ${productPriceMarkup}
                ${s.showExcerpt ? `<p className="text-sm"${excerptStyle}>{post.excerpt}</p>` : ''}
-               ${
-                 hasMeta
-                   ? this.postMeta(s, ctx, {
-                       metaLayout: postListLayout.metaLayout,
-                       metaAlign: postListLayout.metaAlign,
-                       metaSeparator: postListLayout.metaSeparator,
-                       metaGap: postListLayout.metaGap,
-                     })
-                   : ''
-               }
+               ${readMoreMarkup}
+                ${
+                  hasMeta
+                    ? this.postMeta(s, ctx, {
+                        metaLayout: postListLayout.metaLayout,
+                        metaAlign: postListLayout.metaAlign,
+                        metaSeparator: postListLayout.metaSeparator,
+                        metaGap: postListLayout.metaGap,
+                      })
+                    : ''
+                }
                ${productButtonMarkup}`;
 
     const featuredImageStyle = this.buildBlockStyleAttr(
@@ -5206,22 +5405,44 @@ ${indent}) : null}`;
       ctx,
     );
     const featuredImageMarkup = s.showFeaturedImage
-      ? `              {post.featuredImage && <img src={post.featuredImage} alt={post.title} className="w-full h-[220px] object-cover ${imageRadius}"${featuredImageStyle} />}`
+      ? `              {post.featuredImage && <Link to={\`${detailRouteBase}/\${post.slug}\`} className="block"><img src={post.featuredImage} alt={post.title} className="w-full h-[220px] object-cover ${imageRadius}"${featuredImageStyle} /></Link>}`
       : '';
+    const contentWrapperStyle = s.contentPaddingStyle
+      ? this.buildStyleAttr({ padding: s.contentPaddingStyle })
+      : '';
+    const contentWrapperStart = s.contentPaddingStyle
+      ? `              <div className="flex flex-col gap-4"${contentWrapperStyle}>\n`
+      : '';
+    const contentWrapperEnd = s.contentPaddingStyle
+      ? '\n              </div>'
+      : '';
+    const postCardStyle = this.mergeStyleAttrs(
+      this.buildBlockStyleAttr(
+        cardStylePreset,
+        {
+          ...(s.contentPaddingStyle ? {} : { padding: l.cardPadding }),
+          gap: postListLayout.itemGap,
+        },
+        false,
+        ctx,
+      ),
+      s.cardStyle ? this.blueprintCardStyleAttr(s.cardStyle) : '',
+    );
     const postCard = isGrid
-      ? `            <article key={post.id} className="flex flex-col gap-2"${this.buildBlockStyleAttr(cardStylePreset, { padding: l.cardPadding, gap: postListLayout.itemGap }, false, ctx)}>
-              ${featuredImageMarkup}
-              ${postListLayout.itemLayout === 'title-meta-inline' && hasMeta ? titleMetaRow : stackedContent}
-            </article>`
+      ? `            <article key={post.id} className="flex flex-col gap-2${s.cardStyle?.borderRadius ? ' overflow-hidden' : ''}"${postCardStyle}>
+               ${featuredImageMarkup}
+${contentWrapperStart}               ${postListLayout.itemLayout === 'title-meta-inline' && hasMeta ? titleMetaRow : stackedContent}${contentWrapperEnd}
+             </article>`
       : postListLayout.itemLayout === 'title-meta-inline' && hasMeta
-        ? `            <article key={post.id} className="${isEditorialList ? `flex flex-col ${s.showDividers ? 'border-t' : ''} py-6 md:py-8` : 'flex flex-col py-4'}"${articleStyle}>
+        ? `            <article key={post.id} className="${isEditorialList ? `flex flex-col ${s.showDividers ? 'border-t' : ''} py-6 md:py-8` : 'flex flex-col py-4'}${s.cardStyle?.borderRadius ? ' overflow-hidden' : ''}"${this.mergeStyleAttrs(articleStyle, s.cardStyle ? this.blueprintCardStyleAttr(s.cardStyle) : '')}>
                ${featuredImageMarkup}
-               ${titleMetaRow}
+${contentWrapperStart}               ${titleMetaRow}
                ${s.showExcerpt ? `<p className="text-sm"${excerptStyle}>{post.excerpt}</p>` : ''}
+               ${readMoreMarkup}${contentWrapperEnd}
               </article>`
-        : `            <article key={post.id} className="${isEditorialList ? `flex flex-col ${s.showDividers ? 'border-t' : ''} py-6 md:py-8` : 'flex flex-col py-4'}"${articleStyle}>
+        : `            <article key={post.id} className="${isEditorialList ? `flex flex-col ${s.showDividers ? 'border-t' : ''} py-6 md:py-8` : 'flex flex-col py-4'}${s.cardStyle?.borderRadius ? ' overflow-hidden' : ''}"${this.mergeStyleAttrs(articleStyle, s.cardStyle ? this.blueprintCardStyleAttr(s.cardStyle) : '')}>
                ${featuredImageMarkup}
-               ${stackedContent}
+${contentWrapperStart}               ${stackedContent}${contentWrapperEnd}
               </article>`;
 
     return `      {/* Post List */}
@@ -5385,10 +5606,20 @@ ${postCard}
       gap: options.metaGap,
     });
     const datePart = s.showDate
-      ? `<time className="whitespace-nowrap">{new Date(post.date).toLocaleDateString()}</time>`
+      ? (() => {
+          const base = `<time className="whitespace-nowrap">{new Date(post.date).toLocaleDateString()}</time>`;
+          return s.dateIcon
+            ? `<span className="inline-flex items-center gap-2">${this.renderPostMetaIcon(s.dateIcon)}${base}</span>`
+            : base;
+        })()
       : '';
     const authorPart = s.showAuthor
-      ? `{post.author && (post.authorSlug ? <Link to={\`/author/\${post.authorSlug}\`} className="${metaLinkClass}">by {post.author}</Link> : <span>by {post.author}</span>)}`
+      ? (() => {
+          const base = `{post.author && (post.authorSlug ? <Link to={\`/author/\${post.authorSlug}\`} className="${metaLinkClass}">{post.author}</Link> : <span>{post.author}</span>)}`;
+          return s.authorIcon
+            ? `<span className="inline-flex items-center gap-2">${this.renderPostMetaIcon(s.authorIcon)}${base}</span>`
+            : `{post.author && (post.authorSlug ? <Link to={\`/author/\${post.authorSlug}\`} className="${metaLinkClass}">by {post.author}</Link> : <span>by {post.author}</span>)}`;
+        })()
       : '';
     const categoryPrefix =
       s.categoryPrefix ??
@@ -6855,6 +7086,7 @@ ${this.renderSidebarCard(s, ctx, 10)}
     ctx: RenderCtx,
     sidebarLeft: boolean,
     componentName: string,
+    useSharedSidebarComponent = false,
   ): string {
     const { p } = ctx;
     const shellHasExplicitSpacing = Boolean(
@@ -6876,7 +7108,9 @@ ${this.renderSidebarCard(s, ctx, 10)}
         : mainSection.type === 'page-content'
           ? this.renderPageContentInner(mainSection, ctx)
           : this.renderProseBlockInner(mainSection, ctx);
-    const sidebarCard = this.renderSidebarCard(sidebarSection, ctx, 8);
+    const sidebarCard = useSharedSidebarComponent
+      ? '<Sidebar />'
+      : this.renderSidebarCard(sidebarSection, ctx, 8);
     const gridStyle = this.buildStyleAttr({
       gridTemplateColumns: sidebarLeft
         ? `${ctx.l.sidebarWidth ?? '320px'} minmax(0,1fr)`
@@ -6914,6 +7148,7 @@ ${this.renderSidebarCard(s, ctx, 10)}
     ctx: RenderCtx,
     sidebarLeft: boolean,
     componentName: string,
+    useSharedSidebarComponent = false,
   ): string {
     const { p } = ctx;
     const shellPy = this.explicitSectionPaddingClass(sidebarSection);
@@ -6935,7 +7170,9 @@ ${this.renderSidebarCard(s, ctx, 10)}
         this.renderSidebarMainColumnSection(section, ctx, componentName, index),
       )
       .join('\n\n');
-    const sidebarCard = this.renderSidebarCard(sidebarSection, ctx, 8);
+    const sidebarCard = useSharedSidebarComponent
+      ? '<Sidebar />'
+      : this.renderSidebarCard(sidebarSection, ctx, 8);
 
     return `      {/* Full Main Column With Sidebar */}
       <section className="bg-[${bg}] ${shellPy} w-full"${sectionStyle}>
@@ -6973,6 +7210,35 @@ ${mainMarkup}
       default:
         return this.renderSection(section, ctx, componentName, index);
     }
+  }
+
+  private usesSharedSidebarComponent(plan: ComponentVisualPlan): boolean {
+    if (isPartialComponentName(plan.componentName)) return false;
+    if (/^sidebar$/i.test(plan.componentName)) return false;
+    if (!(plan.layout.includes ?? []).includes('Sidebar')) return false;
+    return (
+      plan.sections.some((section) => section.type === 'sidebar') ||
+      this.blockTreeContainsSidebarTemplatePlaceholder(plan.blockTree ?? []) ||
+      (plan.layout.contentLayout !== undefined &&
+        plan.layout.contentLayout !== 'single-column')
+    );
+  }
+
+  private blockTreeContainsSidebarTemplatePlaceholder(
+    nodes: BlockNode[],
+  ): boolean {
+    return nodes.some(
+      (node) =>
+        node.kind === 'template-part' ||
+        (node.children?.length
+          ? this.blockTreeContainsSidebarTemplatePlaceholder(node.children)
+          : false),
+    );
+  }
+
+  private isStandaloneSharedSidebarBlockNode(node: BlockNode): boolean {
+    const classes = node.customClassNames ?? [];
+    return classes.some((className) => /(^|-)sticky-sidebar$/i.test(className));
   }
 
   private renderPostContentInner(
@@ -7164,6 +7430,9 @@ ${segments}
     ctx: RenderCtx,
     maxItemsOverride?: number,
   ): string {
+    if (s.widgetLayout === 'stacked-cards') {
+      return this.renderStackedSidebarCards(s, ctx, maxItemsOverride);
+    }
     const { p, t, l } = ctx;
     const radius = this.cardRadiusClass(ctx) || 'rounded-2xl';
     const paddingStyle = this.buildMergedBlockStyleAttr(
@@ -7190,22 +7459,70 @@ ${segments}
 ${titleBlock}${widgetBlocks}          </div>`;
   }
 
+  private renderStackedSidebarCards(
+    s: SidebarSection,
+    ctx: RenderCtx,
+    maxItemsOverride?: number,
+  ): string {
+    const wrapperClassName = this.appendOptionalCustomClasses(
+      'flex flex-col gap-6',
+      s.customClassNames,
+    );
+    const wrapperStyle = s.widgetGapStyle
+      ? this.buildStyleAttr({ gap: s.widgetGapStyle })
+      : '';
+    const maxItems = maxItemsOverride ?? s.maxItems ?? 6;
+    const widgetBlocks = (s.widgets ?? [])
+      .map((widget) => this.renderSidebarWidgetCard(widget, ctx, maxItems))
+      .join('\n');
+    return `          <div className="${wrapperClassName}"${wrapperStyle}>
+${widgetBlocks}          </div>`;
+  }
+
+  private renderSidebarWidgetCard(
+    widget: SidebarWidget,
+    ctx: RenderCtx,
+    maxItems: number,
+  ): string {
+    const { p, l } = ctx;
+    const radius = this.cardRadiusClass(ctx) || 'rounded-2xl';
+    const defaultCardStyle = this.buildStyleAttr({
+      background: p.surface,
+      padding: l.cardPadding,
+    });
+    const widgetCardStyle = widget.cardStyle
+      ? this.blueprintCardStyleAttr(widget.cardStyle)
+      : '';
+    const cardStyle = this.mergeStyleAttrs(defaultCardStyle, widgetCardStyle);
+    const cardClassName = this.appendOptionalCustomClasses(
+      `flex flex-col gap-6 ${radius}`,
+      widget.customClassNames,
+    );
+    return `            <div className="${cardClassName}"${cardStyle}>
+${this.renderSidebarWidget(widget, ctx, maxItems)}
+            </div>`;
+  }
+
   private renderSidebarWidget(
     widget: SidebarWidget,
     ctx: RenderCtx,
     maxItems: number,
   ): string {
     const { p, t } = ctx;
-    const headingStyle = this.buildTextTokenStyleAttr(
-      ctx,
-      { baseColor: p.text },
-      this.pickBlockStyle(ctx, 'heading'),
-    );
-    const bodyStyle = this.buildTextTokenStyleAttr(
-      ctx,
-      { baseColor: p.textMuted },
-      this.pickBlockStyle(ctx, 'paragraph'),
-    );
+    const headingStyle = widget.titleStyle
+      ? this.blueprintTypographyStyleAttr(widget.titleStyle)
+      : this.buildTextTokenStyleAttr(
+          ctx,
+          { baseColor: p.text },
+          this.pickBlockStyle(ctx, 'heading'),
+        );
+    const bodyStyle = widget.bodyStyle
+      ? this.blueprintTypographyStyleAttr(widget.bodyStyle)
+      : this.buildTextTokenStyleAttr(
+          ctx,
+          { baseColor: p.textMuted },
+          this.pickBlockStyle(ctx, 'paragraph'),
+        );
     const navLinkStyle = this.buildTextTokenStyleAttr(
       ctx,
       { baseColor: p.text },
@@ -7227,22 +7544,40 @@ ${titleBlock}${widgetBlocks}          </div>`;
       this.pickBlockStyle(ctx, 'paragraph'),
     );
     const linkClass = this.textLinkClass(p.text, p.accent, 'text-sm');
+    const titleTag = `h${Math.min(Math.max(widget.titleLevel ?? 3, 1), 6)}`;
+    const titleMarkup = widget.title
+      ? `              <${titleTag} className="${t.h3} font-normal text-[${p.text}]"${headingStyle}>${widget.title}</${titleTag}>\n`
+      : '';
+    const widgetMaxItems = widget.maxItems ?? maxItems;
 
     switch (widget.kind) {
       case 'search': {
-        const placeholder = JSON.stringify(widget.placeholder ?? 'Search...');
+        const placeholder = JSON.stringify(widget.placeholder ?? 'Search');
         const buttonLabel = widget.buttonLabel ?? 'Search';
-        return `            <section className="flex flex-col gap-[16px]">
-${
-  widget.title
-    ? `              <h3 className="${t.h3} font-normal text-[${p.text}]"${headingStyle}>${widget.title}</h3>
-`
-    : ''
-}              <form role="search" className="flex gap-2" action="/search" method="get">
-                <input type="search" name="s" placeholder=${placeholder} className="min-w-0 flex-1 ${t.buttonRadius}"${searchControlStyle} />
-                <button type="submit" className="bg-[${p.accent}] px-4 py-2 text-[${p.accentText}] ${t.buttonRadius} hover:opacity-90"${this.buttonStyleAttr(ctx)}>${buttonLabel}</button>
+        const buttonUseIcon = widget.buttonUseIcon === true;
+        const buttonInside =
+          widget.buttonPosition === 'button-inside' || buttonUseIcon;
+        if (buttonInside) {
+          return `            <section className="flex flex-col gap-[16px]">
+${titleMarkup}              <form role="search" className="relative" action="/search" method="get">
+                <input type="search" name="s" placeholder=${placeholder} className="min-w-0 w-full ${t.buttonRadius}"${this.mergeStyleAttrs(searchControlStyle, this.buildStyleAttr({ paddingRight: '4.25rem' }))} />
+                <button type="submit" aria-label=${JSON.stringify(buttonLabel)} className="absolute inset-y-0 right-0 inline-flex w-[56px] items-center justify-center bg-[${p.accent}] text-[${p.accentText}] hover:opacity-90"${this.mergeStyleAttrs(this.buttonStyleAttr(ctx), this.buildStyleAttr({ borderTopRightRadius: 'inherit', borderBottomRightRadius: 'inherit' }))}>
+                  ${
+                    buttonUseIcon
+                      ? `<span className="sr-only">${buttonLabel}</span>
+                  ${this.renderSidebarSearchIcon()}`
+                      : buttonLabel
+                  }
+                </button>
               </form>
             </section>`;
+        }
+        return `            <section className="flex flex-col gap-[16px]">
+${titleMarkup}              <form role="search" className="flex gap-2" action="/search" method="get">
+                 <input type="search" name="s" placeholder=${placeholder} className="min-w-0 flex-1 ${t.buttonRadius}"${searchControlStyle} />
+                 <button type="submit" className="bg-[${p.accent}] px-4 py-2 text-[${p.accentText}] ${t.buttonRadius} hover:opacity-90"${this.buttonStyleAttr(ctx)}>${buttonLabel}</button>
+               </form>
+             </section>`;
       }
       case 'author-bio': {
         const descriptionExpr = widget.description
@@ -7255,88 +7590,79 @@ ${
   widget.showAvatar === false
     ? ''
     : `              <div className="inline-flex h-20 w-20 items-center justify-center rounded-[16px] bg-white text-xl font-semibold text-[${p.text}]">
-                 {(${authorNameExpr} || '?').charAt(0).toUpperCase()}
-               </div>
+                  {(${authorNameExpr} || '?').charAt(0).toUpperCase()}
+                </div>
 `
 }
-${
-  widget.title
-    ? `              <h3 className="${t.h3} font-normal text-[${p.text}]"${headingStyle}>${widget.title}</h3>
-`
-    : ''
-}              <div className="flex flex-col gap-2">
-                 <p className="text-sm font-medium text-[${p.text}]">
-                   {${authorNameExpr}}
-                 </p>
-                 {${descriptionExpr} ? (
-                   <p className="text-sm text-[${p.textMuted}]"${bodyStyle}>{${descriptionExpr}}</p>
+${titleMarkup}              <div className="flex flex-col gap-2">
+                  <p className="text-sm font-medium text-[${p.text}]">
+                    {${authorNameExpr}}
+                  </p>
+                  {${descriptionExpr} ? (
+                    <p className="text-sm text-[${p.textMuted}]"${bodyStyle}>{${descriptionExpr}}</p>
                  ) : null}
               </div>
             </section>`;
       }
       case 'categories':
         return `            <section className="flex flex-col gap-[16px]">
-${
-  widget.title
-    ? `              <h3 className="${t.h3} font-normal text-[${p.text}]"${headingStyle}>${widget.title}</h3>
-`
-    : ''
-}              <ul className="flex flex-col gap-2 text-sm text-[${p.textMuted}]">
-                {(() => {
-                  const categoryMap = new Map();
-                  posts.forEach((post) => {
-                    (post.categories ?? []).forEach((name, index) => {
-                      const slug = post.categorySlugs?.[index] ?? '';
+${titleMarkup}              <ul className="flex flex-col gap-2 text-sm text-[${p.textMuted}]">
+                 {(() => {
+                   const categoryMap = new Map();
+                   posts.forEach((post) => {
+                     (post.categories ?? []).forEach((name, index) => {
+                       const slug = post.categorySlugs?.[index] ?? '';
                       const key = name + '::' + slug;
                       const existing = categoryMap.get(key);
                       if (existing) existing.count += 1;
                       else categoryMap.set(key, { name, slug, count: 1 });
                     });
-                  });
-                  return Array.from(categoryMap.values())
-                    .sort((a, b) => b.count - a.count)
-                    .slice(0, ${maxItems})
-                    .map((category) => (
-                      <li key={category.slug || category.name}>
-                        {category.slug ? (
-                          <Link to={'/category/' + category.slug} className="${linkClass}"${navLinkStyle}>
-                            {category.name}${widget.showCounts ? ` ({category.count})` : ''}
-                          </Link>
-                        ) : (
-                          <span>{category.name}${widget.showCounts ? ` ({category.count})` : ''}</span>
-                        )}
-                      </li>
-                    ));
-                })()}
-              </ul>
+                   });
+                   return Array.from(categoryMap.values())
+                     .sort((a, b) => b.count - a.count)
+                     .slice(0, ${widgetMaxItems})
+                     .map((category) => (
+                       <li key={category.slug || category.name} className="flex items-center gap-2">
+                         <span aria-hidden="true" className="shrink-0 text-[${p.textMuted}]">&gt;</span>
+                         {category.slug ? (
+                           <Link to={'/category/' + category.slug} className="${linkClass} min-w-0 flex-1"${navLinkStyle}>
+                             {category.name}${widget.showCounts ? ` ({category.count})` : ''}
+                           </Link>
+                         ) : (
+                           <span className="min-w-0 flex-1">{category.name}${widget.showCounts ? ` ({category.count})` : ''}</span>
+                         )}
+                       </li>
+                     ));
+                 })()}
+               </ul>
             </section>`;
       case 'tags':
         return `            <section className="flex flex-col gap-[16px]">
-${
-  widget.title
-    ? `              <h3 className="${t.h3} font-normal text-[${p.text}]"${headingStyle}>${widget.title}</h3>
-`
-    : ''
-}              <div className="flex flex-wrap gap-2 text-sm text-[${p.textMuted}]">
-                 {(() => {
-                   const tagMap = new Map();
-                   posts.forEach((post) => {
-                     (post.tags ?? []).forEach((tag) => {
+${titleMarkup}              <div className="flex flex-wrap items-baseline gap-x-3 gap-y-2 text-[${p.textMuted}]">
+                   {(() => {
+                     const tagMap = new Map();
+                     posts.forEach((post) => {
+                      (post.tags ?? []).forEach((tag) => {
                        const key = String(tag ?? '').trim();
                        if (!key) return;
                        tagMap.set(key, (tagMap.get(key) ?? 0) + 1);
                      });
-                   });
-                   return Array.from(tagMap.entries())
-                     .sort((a, b) => b[1] - a[1])
-                     .slice(0, ${maxItems})
-                     .map(([tag, count]) => {
-                       const slug = encodeURIComponent(tag.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, ''));
-                       return (
-                         <Link key={tag} to={'/tag/' + slug} className="${linkClass}"${navLinkStyle}>
-                           {tag}${widget.showCounts ? ` ({count})` : ''}
-                         </Link>
-                       );
+                    });
+                     const sortedTags = Array.from(tagMap.entries())
+                       .sort((a, b) => b[1] - a[1])
+                       .slice(0, ${widgetMaxItems});
+                     const counts = sortedTags.map((entry) => entry[1]);
+                     const minCount = counts.length > 0 ? Math.min(...counts) : 1;
+                     const maxCount = counts.length > 0 ? Math.max(...counts) : 1;
+                     return sortedTags.map(([tag, count]) => {
+                         const slug = encodeURIComponent(tag.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, ''));
+                         const ratio = maxCount === minCount ? 0.5 : (count - minCount) / (maxCount - minCount);
+                         const fontSize = (0.95 + ratio * 0.45).toFixed(2) + 'rem';
+                         return (
+                           <Link key={tag} to={'/tag/' + slug} className="${linkClass} leading-none" style={{ fontSize, color: '${p.text}' }}>
+                             {tag}${widget.showCounts ? ` ({count})` : ''}
+                          </Link>
+                        );
                      });
                  })()}
                </div>
@@ -7350,21 +7676,16 @@ ${
           ? `              <p className="text-sm text-[${p.textMuted}]"${bodyStyle}>{${JSON.stringify(widget.description)}}</p>\n`
           : '';
         return `            <section className="flex flex-col gap-[16px]">
-${
-  widget.title
-    ? `              <h3 className="${t.h3} font-normal text-[${p.text}]"${headingStyle}>${widget.title}</h3>
-`
-    : ''
-}${description}              <nav className="flex flex-col gap-2">
-                {(() => {
-                  const menuItems = ((menus.find((menu) => menu.slug === ${menuSlug}) ?? menus[0])?.items ?? [])
-                    .filter((item) => item.parentId === 0)
-                    .slice(0, ${maxItems});
-                  if (menuItems.length > 0) {
-                    return menuItems.map((item) =>
-                      isInternalPath(item.url) ? (
-                        <Link key={item.id} to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${linkClass}"${navLinkStyle}>
-                          {item.title}
+${titleMarkup}${description}              <nav className="flex flex-col gap-2">
+                 {(() => {
+                   const menuItems = ((menus.find((menu) => menu.slug === ${menuSlug}) ?? menus[0])?.items ?? [])
+                     .filter((item) => item.parentId === 0)
+                     .slice(0, ${widgetMaxItems});
+                   if (menuItems.length > 0) {
+                     return menuItems.map((item) =>
+                       isInternalPath(item.url) ? (
+                         <Link key={item.id} to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${linkClass}"${navLinkStyle}>
+                           {item.title}
                         </Link>
                       ) : (
                         <a key={item.id} href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${linkClass}"${navLinkStyle}>
@@ -7372,27 +7693,22 @@ ${
                         </a>
                       ),
                     );
-                  }
-                  return (${fallbackLinks} as Array<{ label: string; url?: string }>)
-                    .slice(0, ${maxItems})
-                    .map((link, index) => (
-                      <a key={link.label + '-' + index} href={link.url ?? '#'} className="${linkClass}"${navLinkStyle}>
-                        {link.label}
-                      </a>
-                    ));
+                   }
+                   return (${fallbackLinks} as Array<{ label: string; url?: string }>)
+                     .slice(0, ${widgetMaxItems})
+                     .map((link, index) => (
+                       <a key={link.label + '-' + index} href={link.url ?? '#'} className="${linkClass}"${navLinkStyle}>
+                         {link.label}
+                       </a>
+                     ));
                 })()}
               </nav>
             </section>`;
       }
       case 'pages-list':
         return `            <section className="flex flex-col gap-[16px]">
-${
-  widget.title
-    ? `              <h3 className="${t.h3} font-normal text-[${p.text}]"${headingStyle}>${widget.title}</h3>
-`
-    : ''
-}              <nav className="flex flex-col gap-2">
-                {pages.slice(0, ${maxItems}).map((page) => (
+${titleMarkup}              <nav className="flex flex-col gap-2">
+                {pages.slice(0, ${widgetMaxItems}).map((page) => (
                   <Link key={page.id} to={'/page/' + page.slug} className="${linkClass}"${navLinkStyle}>
                     {page.title}
                   </Link>
@@ -7400,21 +7716,71 @@ ${
               </nav>
             </section>`;
       case 'recent-posts':
+        const recentPostTitleStyle = widget.bodyStyle
+          ? this.blueprintTypographyStyleAttr(widget.bodyStyle)
+          : this.buildTextTokenStyleAttr(
+              ctx,
+              { baseColor: p.text },
+              this.pickBlockStyle(ctx, 'paragraph'),
+            );
+        const recentPostExcerptStyle = this.buildTextTokenStyleAttr(
+          ctx,
+          { baseColor: p.textMuted },
+          this.pickBlockStyle(ctx, 'paragraph'),
+        );
+        const recentPostsWrapperStyle = this.buildStyleAttr({
+          marginTop: 'var(--wp--preset--spacing--30)',
+          marginBottom: 'var(--wp--preset--spacing--30)',
+        });
         return `            <section className="flex flex-col gap-[16px]">
-${
-  widget.title
-    ? `              <h3 className="${t.h3} font-normal text-[${p.text}]"${headingStyle}>${widget.title}</h3>
-`
-    : ''
-}              <div className="flex flex-col gap-2">
-                {posts.slice(0, ${maxItems}).map((post) => (
-                  <Link key={post.id} to={'/post/' + post.slug} className="${linkClass}"${navLinkStyle}>
-                    {post.title}
-                  </Link>
-                ))}
-              </div>
-            </section>`;
+${titleMarkup}              <div className="flex flex-col gap-4"${recentPostsWrapperStyle}>
+                 {posts.slice(0, ${widgetMaxItems}).map((post) => (
+                   <article key={post.id} className="${widget.displayFeaturedImage ? 'flex items-start gap-3' : 'block'}">
+                     ${widget.displayFeaturedImage ? `{post.featuredImage ? <Link to={'/post/' + post.slug} className="shrink-0"${navLinkStyle}><img src={post.featuredImage} alt={post.title} className="h-auto shrink-0 rounded-[10px] object-cover" style={{ width: '${widget.featuredImageSizeWidth ?? 75}px', height: '${widget.featuredImageSizeHeight ?? 75}px' }} /></Link> : null}` : ''}
+                     <div className="flex min-w-0 flex-1 flex-col gap-2">
+                       <Link to={'/post/' + post.slug} className="${this.textLinkClass(p.text, p.accent)} block"${navLinkStyle}>
+                         <span className="block text-[${p.text}]"${recentPostTitleStyle}>{post.title}</span>
+                       </Link>
+                       {post.excerpt ? (
+                         <div className="text-sm leading-6 text-[${p.textMuted}]"${recentPostExcerptStyle}>
+                           {renderRichTextChildren(post.excerpt ?? '', "sidebar-post-excerpt")}
+                         </div>
+                       ) : null}
+                     </div>
+                   </article>
+                 ))}
+               </div>
+             </section>`;
     }
+  }
+
+  private renderSidebarSearchIcon(): string {
+    return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true" className="h-5 w-5">
+                    <circle cx="11" cy="11" r="7"></circle>
+                    <path d="m20 20-3.5-3.5"></path>
+                  </svg>`;
+  }
+
+  private renderPostMetaIcon(icon: 'user' | 'calendar'): string {
+    if (icon === 'calendar') {
+      return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true" className="h-[14px] w-[14px] shrink-0">
+                    <path d="M8 2v4"></path>
+                    <path d="M16 2v4"></path>
+                    <rect x="3" y="5" width="18" height="16" rx="2"></rect>
+                    <path d="M3 10h18"></path>
+                  </svg>`;
+    }
+    return `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" className="h-[14px] w-[14px] shrink-0">
+                    <path d="M12 12a4.5 4.5 0 1 0 0-9 4.5 4.5 0 0 0 0 9Z"></path>
+                    <path d="M4 20a8 8 0 1 1 16 0v1H4v-1Z"></path>
+                  </svg>`;
+  }
+
+  private renderReadMoreArrowIcon(): string {
+    return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true" className="h-4 w-4">
+                    <path d="M5 12h14"></path>
+                    <path d="m13 5 7 7-7 7"></path>
+                  </svg>`;
   }
 
   private extractSectionStyleBase(
@@ -7496,7 +7862,13 @@ ${
     const indent = '  '.repeat(depth);
     const childIndent = '  '.repeat(depth + 1);
     const children = node.children?.length
-      ? this.renderBlockFaithfulNodes(node.children, ctx, state, depth + 1, node)
+      ? this.renderBlockFaithfulNodes(
+          node.children,
+          ctx,
+          state,
+          depth + 1,
+          node,
+        )
       : '';
 
     if (block === 'template-part') return children;

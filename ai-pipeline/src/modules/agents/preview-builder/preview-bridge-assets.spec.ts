@@ -13,6 +13,13 @@ describe('preview source motion bridge assets', () => {
     expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
       'header.wp-site-blocks:has(#sticky-header)',
     );
+    expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
+      'header.wp-site-blocks:has(> #sticky-header) > #sticky-header',
+    );
+    expect(SOURCE_MOTION_BRIDGE_CSS).toContain('position: sticky !important;');
+    expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
+      'position: relative !important;',
+    );
     expect(SOURCE_MOTION_BRIDGE_CSS).toContain('@media (max-width: 780px)');
     expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
       '#sticky-header button[aria-label="Toggle menu"]',
@@ -90,6 +97,17 @@ describe('preview source motion bridge assets', () => {
     expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
       'max-width: var(--wp--style--global--wide-size, 1200px);',
     );
+    expect(SOURCE_MOTION_BRIDGE_CSS).toContain('@media (max-width: 780px)');
+    expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
+      'footer .pg-footer-center-row > .wp-block-columns > .wp-block-column',
+    );
+    expect(SOURCE_MOTION_BRIDGE_CSS).toContain('flex-basis: 100% !important;');
+    expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
+      'footer .has-base-2-background-color > .wp-block-group',
+    );
+    expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
+      'text-align: center !important;',
+    );
     expect(SOURCE_MOTION_BRIDGE_CSS).not.toContain(
       'footer .pg-footer-center-row,\n  footer .has-base-2-background-color {\n    width: 100vw !important;',
     );
@@ -121,6 +139,9 @@ describe('preview source motion bridge assets', () => {
       '.profolio-fse-banner-wrapper mark',
     );
     expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
+      '.profolio-fse-banner-wrapper {\n    width: 100vw !important;',
+    );
+    expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
       'background-color: transparent !important;',
     );
     expect(SOURCE_MOTION_BRIDGE_CSS).toContain('color: #F5B731 !important;');
@@ -129,10 +150,22 @@ describe('preview source motion bridge assets', () => {
     );
     expect(SOURCE_MOTION_BRIDGE_CSS).toContain('display: none !important;');
     expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
+      '.wp-site-blocks .profolio-fse-banner-wrapper > div[class*="max-w-"][class*="1200px"]',
+    );
+    expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
+      'padding-left: min(6.5rem, 8vw) !important;',
+    );
+    expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
+      'padding-right: min(6.5rem, 8vw) !important;',
+    );
+    expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
       '.profolio-fse-banner-wrapper .wp-block-button__link',
     );
     expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
       '.profolio-fse-banner-wrapper .vp-generated-button',
+    );
+    expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
+      '.profolio-fse-banner-wrapper .vp-generated-button *',
     );
     expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
       'background-color: #F5B731 !important;',
@@ -153,9 +186,7 @@ describe('preview source motion bridge assets', () => {
     expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
       '.profolio-fse-banner-wrapper img[src*="banner-image"]',
     );
-    expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
-      'margin-left: auto !important;',
-    );
+    expect(SOURCE_MOTION_BRIDGE_CSS).toContain('margin-left: auto !important;');
     expect(SOURCE_MOTION_BRIDGE_CSS).toContain('--vp-wow-distance: 38px;');
     expect(SOURCE_MOTION_BRIDGE_CSS).toContain('--vp-wow-duration: 820ms;');
     expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
@@ -168,7 +199,9 @@ describe('preview source motion bridge assets', () => {
     expect(SOURCE_MOTION_BRIDGE_CSS).toContain('.profolio-fse-project-arrow');
     expect(SOURCE_MOTION_BRIDGE_CSS).toContain('top: 1em !important;');
     expect(SOURCE_MOTION_BRIDGE_CSS).toContain('right: 1em !important;');
-    expect(SOURCE_MOTION_BRIDGE_CSS).toContain('border-radius: 5px !important;');
+    expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
+      'border-radius: 5px !important;',
+    );
     expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
       '.r-cover div:has(> img[src*="arrow-up"])',
     );
@@ -197,7 +230,17 @@ describe('preview source motion bridge assets', () => {
     expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
       '.profolio-fse-services-wrapper .wp-block-button__link:not(.is-style-outline)',
     );
+    expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
+      '.profolio-fse-services-wrapper .vp-generated-button:not(.is-style-outline)',
+    );
+    expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
+      '.profolio-fse-services-wrapper .vp-generated-button.is-style-outline',
+    );
+    expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
+      'background-color: transparent !important;',
+    );
     expect(SOURCE_MOTION_BRIDGE_CSS).toContain('color: #f2f2f2 !important;');
+    expect(SOURCE_MOTION_BRIDGE_CSS).toContain('color: #2F4138 !important;');
     expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
       '.profolio-fse-experience-wrapper',
     );
@@ -208,10 +251,18 @@ describe('preview source motion bridge assets', () => {
     expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
       'padding-bottom: 80px !important;',
     );
-    expect(SOURCE_MOTION_BRIDGE_CSS).toContain('padding-left: 20px !important;');
+    expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
+      'padding-left: 20px !important;',
+    );
     expect(SOURCE_MOTION_BRIDGE_CSS).toContain('.profolio-fse-experience-copy');
     expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
       '.profolio-fse-experience-image > :first-child:not(img)',
+    );
+    expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
+      '.profolio-fse-experience-image > div[style*="background-color"]',
+    );
+    expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
+      '.profolio-fse-experience-image > span[class*="has-background-dim"]',
     );
     expect(SOURCE_MOTION_BRIDGE_CSS).toContain(
       'background-color: transparent !important;',
@@ -282,9 +333,7 @@ describe('preview source motion bridge assets', () => {
       'const pendingActivations = new Set<HTMLElement>();',
     );
     expect(bootstrap).toContain('const hydrateProfolioRevealCards =');
-    expect(bootstrap).toContain(
-      '.profolio-fse-banner-wrapper .cover-inner',
-    );
+    expect(bootstrap).toContain('.profolio-fse-banner-wrapper .cover-inner');
     expect(bootstrap).toContain(
       'const suppressNestedProjectServiceMotion = (scope: ParentNode) => {',
     );
@@ -317,7 +366,7 @@ describe('preview source motion bridge assets', () => {
       '[data-source-node-id="front-page::group::1.3.1"] > div',
     );
     expect(bootstrap).toContain(
-      "].forEach((className) => element.classList.remove(className));",
+      '].forEach((className) => element.classList.remove(className));',
     );
     expect(bootstrap).toContain("element.classList.add('animate__zoomIn');");
     expect(bootstrap).toContain("element.classList.add('animate__delay-1s');");

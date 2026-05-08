@@ -405,13 +405,17 @@ const DANGEROUS_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   },
   {
     // Catches import ... from 'child_process' / 'fs' / 'vm' / 'net' / 'os' / 'cluster'
-    pattern: /\bimport\b[^'"]*from\s+['"`](child_process|fs|path|os|net|vm|cluster)['"`]/,
-    reason: 'Node.js built-in module imports are not allowed in React components',
+    pattern:
+      /\bimport\b[^'"]*from\s+['"`](child_process|fs|path|os|net|vm|cluster)['"`]/,
+    reason:
+      'Node.js built-in module imports are not allowed in React components',
   },
   {
     // Catches require('child_process') style calls
-    pattern: /\brequire\s*\(\s*['"`](child_process|fs|path|os|net|http|https|vm|cluster)['"`]/,
-    reason: 'Node.js built-in require() calls are not allowed in React components',
+    pattern:
+      /\brequire\s*\(\s*['"`](child_process|fs|path|os|net|http|https|vm|cluster)['"`]/,
+    reason:
+      'Node.js built-in require() calls are not allowed in React components',
   },
   {
     pattern: /\bchild_process\b/,
@@ -419,7 +423,8 @@ const DANGEROUS_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   },
   {
     pattern: /\b(execSync|spawnSync)\s*\(/,
-    reason: 'Synchronous shell execution is not allowed in generated components',
+    reason:
+      'Synchronous shell execution is not allowed in generated components',
   },
   {
     // exec( and spawn( only when clearly a shell call (followed by a string arg)
@@ -428,7 +433,8 @@ const DANGEROUS_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   },
   {
     pattern: /\bprocess\.(exit|kill|binding|dlopen)\s*\(/,
-    reason: 'Dangerous process operations are not allowed in generated components',
+    reason:
+      'Dangerous process operations are not allowed in generated components',
   },
   {
     // Dynamic import of an absolute external URL
@@ -438,11 +444,13 @@ const DANGEROUS_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   {
     // fetch() with a hardcoded external URL literal
     pattern: /\bfetch\s*\(\s*['"`]https?:\/\//,
-    reason: 'fetch() with hardcoded external URLs is not allowed; use relative API paths',
+    reason:
+      'fetch() with hardcoded external URLs is not allowed; use relative API paths',
   },
   {
     // atob/btoa chained with eval — common obfuscation pattern
-    pattern: /\batob\s*\([\s\S]{0,200}\beval\b|\beval\b[\s\S]{0,200}\batob\s*\(/,
+    pattern:
+      /\batob\s*\([\s\S]{0,200}\beval\b|\beval\b[\s\S]{0,200}\batob\s*\(/,
     reason: 'Obfuscated code execution via atob/eval is not allowed',
   },
 ];

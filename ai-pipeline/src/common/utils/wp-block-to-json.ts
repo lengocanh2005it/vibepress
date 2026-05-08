@@ -228,6 +228,20 @@ function getUsefulParamKeysForBlock(blockName: string): Set<string> {
       keys.add(key);
     }
   }
+  if (['search', 'core/search'].includes(blockName)) {
+    for (const key of [
+      'label',
+      'showLabel',
+      'placeholder',
+      'width',
+      'widthUnit',
+      'buttonText',
+      'buttonPosition',
+      'buttonUseIcon',
+    ]) {
+      keys.add(key);
+    }
+  }
   return keys;
 }
 

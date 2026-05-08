@@ -125,6 +125,26 @@ describe('wpBlocksToJson PHP normalization', () => {
     });
   });
 
+  it('preserves core search control params for deterministic rendering', () => {
+    const markup = `
+<!-- wp:search {"label":"Search","showLabel":false,"placeholder":"Find another ","width":75,"widthUnit":"%","buttonText":"Search","buttonPosition":"button-inside","buttonUseIcon":true,"align":"center"} /-->
+`;
+
+    const nodes = wpBlocksToJson(markup);
+
+    expect(nodes[0]?.params).toMatchObject({
+      label: 'Search',
+      showLabel: false,
+      placeholder: 'Find another ',
+      width: 75,
+      widthUnit: '%',
+      buttonText: 'Search',
+      buttonPosition: 'button-inside',
+      buttonUseIcon: true,
+      align: 'center',
+    });
+  });
+
   it('lifts styling from self-closing site title and navigation blocks', () => {
     const markup = `
 <!-- wp:site-title {"style":{"elements":{"link":{"color":{"text":"var:preset|color|white"}}},"typography":{"fontSize":"30px"}},"textColor":"white"} /-->

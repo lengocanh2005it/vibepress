@@ -773,7 +773,9 @@ describe('ReactGeneratorService source-faithful page policy', () => {
     expect(servicesInput.nodesJson).toContain('profolio-fse-services-stack');
     expect(servicesInput.nodesJson).toContain('profolio-fse-service-card');
     expect(servicesInput.nodesJson).toContain('profolio-fse-service-card-copy');
-    expect(servicesInput.nodesJson).toContain('profolio-fse-service-card-media');
+    expect(servicesInput.nodesJson).toContain(
+      'profolio-fse-service-card-media',
+    );
     expect(servicesInput.nodesJson).toContain('"top": "48px"');
     expect(servicesInput.nodesJson).toContain('"bottom": "24px"');
     const experienceInput = (

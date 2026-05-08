@@ -14,11 +14,17 @@ describe('RuntimePage template source', () => {
     expect(source).not.toContain('setPosts');
   });
 
-  it('treats the API page.content as render-ready canonical markup', () => {
+  it('prefers runtimePlan.blockTree for structural rendering while keeping page.content fallback', () => {
     expect(source).toContain('const { page, runtimePlan } = payload;');
+    expect(source).toContain(
+      'const runtimeContentNodes = selectRuntimeContentNodes(',
+    );
+    expect(source).toContain('runtimePlan.blockTree');
+    expect(source).toContain('runtimePlan.contentBlockTree');
+    expect(source).toContain('renderRuntimeNodes(');
+    expect(source).toContain('runtimeContentNodes');
+    expect(source).toContain("runtimePlan.mode !== 'page-content'");
     expect(source).toContain('renderRichTextChildren(page.content ??');
-    expect(source).not.toContain('runtimePlan.blockTree');
-    expect(source).not.toContain('renderRuntimeNodes');
   });
 
   it('keeps runtime metadata attributes for preview/edit routing', () => {
@@ -31,11 +37,21 @@ describe('RuntimePage template source', () => {
     expect(source).toContain('runtime-page--theme-profolio-fse');
   });
 
-  it('renders expanded profolio-fse templates directly instead of wrapping duplicate hero chrome', () => {
+  it('wraps runtime post content with WordPress/prose spacing classes', () => {
+    expect(source).toContain("'core/post-content': ['wp-block-post-content']");
+    expect(source).toContain("'runtime-page__content'");
+    expect(source).toContain("'wp-block-post-content'");
+    expect(source).toContain("'prose'");
+    expect(source).toContain("'max-w-none'");
+  });
+
+  it('trims expanded profolio-fse templates down to content-shell roots before rendering', () => {
     expect(source).toContain('const hasExpandedTemplate = Boolean(');
-    expect(source).toContain('if (isProfolioFse && hasExpandedTemplate)');
-    expect(source).not.toContain('className="wp-block-cover"');
-    expect(source).not.toContain('page.featuredImage');
+    expect(source).toContain('function selectRuntimeContentNodes(');
+    expect(source).toContain(
+      'const profolioContentRoots = blockTree.filter(isProfolioContentRoot);',
+    );
+    expect(source).toContain("if (node.kind === 'cover') return true;");
   });
 
   it('renders runtime page HTML through rich-text nodes instead of escaping raw content', () => {
@@ -52,5 +68,51 @@ describe('RuntimePage template source', () => {
     expect(source).toContain('parseStyle(element.getAttribute');
     expect(source).toContain('function renderImage');
     expect(source).toContain('function renderAnchor');
+  });
+
+  it('includes recursive runtime block helpers for Gutenberg block trees', () => {
+    expect(source).toContain('function renderRuntimeNodes(');
+    expect(source).toContain('function renderRuntimeNode(');
+    expect(source).toContain('function buildRuntimeNodeProps(');
+    expect(source).toContain('function buildRuntimeNodeStyle(');
+    expect(source).toContain('function renderRuntimeCover(');
+  });
+
+  it('does not force every runtime image to full width', () => {
+    expect(source).toContain('function buildRuntimeImageStyle(');
+    expect(source).toContain('getRuntimeImageSizeMaxWidth(node)');
+    expect(source).toContain("node.align === 'full'");
+    expect(source).toContain("node.align === 'wide'");
+    expect(source).toContain('node.attrs?.sizeSlug');
+    expect(source).toContain("width: shouldStretch ? '100%'");
+    expect(source).toContain('maxWidth: shouldStretch');
+  });
+
+  it('preserves Gutenberg object border radii on runtime blocks and images', () => {
+    expect(source).toContain('function buildRuntimeBorderRadiusStyle(');
+    expect(source).toContain('function applyRuntimeBorderRadiusStyle(');
+    expect(source).toContain('style.borderTopLeftRadius = topLeft');
+    expect(source).toContain('style.borderTopRightRadius = topRight');
+    expect(source).toContain('style.borderBottomRightRadius = bottomRight');
+    expect(source).toContain('style.borderBottomLeftRadius = bottomLeft');
+    expect(source).toContain(
+      'node.style?.border?.radius ?? node.style?.borderRadius ?? node.borderRadius',
+    );
+  });
+
+  it('injects DB-backed content block trees into template content slots', () => {
+    expect(source).toContain('const runtimeContentBlockTree = Array.isArray(');
+    expect(source).toContain('contentBlockTree.length > 0');
+    expect(source).toContain('renderRuntimeNodes(contentBlockTree, page');
+  });
+
+  it('applies runtime theme tokens as WordPress CSS variables', () => {
+    expect(source).toContain(
+      'buildRuntimeThemeStyle(runtimePlan?.themeTokens)',
+    );
+    expect(source).toContain('function buildRuntimeThemeStyle(');
+    expect(source).toContain('--wp--style--global--content-size');
+    expect(source).toContain('--wp--preset--color--');
+    expect(source).toContain('--wp--preset--spacing--');
   });
 });
