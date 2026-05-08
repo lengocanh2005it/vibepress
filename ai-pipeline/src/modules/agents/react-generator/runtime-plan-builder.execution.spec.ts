@@ -174,4 +174,52 @@ describe('runtime-plan-builder execution', () => {
       columnWidth: '40%',
     });
   });
+
+  it('emits detailed DOM, media, width-policy, and content-slot metadata', () => {
+    const plan = buildRuntimePlanFromPageRow({
+      template: 'templates/template-about.html',
+      is_front_page: 0,
+      is_posts_page: 0,
+      post_name: 'structured-media',
+      post_content: [
+        '<!-- wp:group {"align":"full","layout":{"type":"constrained"}} -->',
+        '<div class="wp-block-group alignfull">',
+        '<!-- wp:image {"id":42,"sizeSlug":"large","aspectRatio":"9/16","scale":"cover","style":{"border":{"radius":{"topLeft":"50%","topRight":"50%"}}}} -->',
+        '<figure class="wp-block-image size-large" style="border-radius:50% 50% 0 0"><img src="/wp-content/uploads/team.jpg" alt="Team" width="640" height="960"/></figure>',
+        '<!-- /wp:image -->',
+        '</div>',
+        '<!-- /wp:group -->',
+      ].join('\n'),
+    });
+
+    const contentRoot = plan.contentBlockTree[0];
+    const image = contentRoot.children?.[0];
+
+    expect(plan.contentSlot).toMatchObject({
+      blockName: 'core/post-content',
+      bindingSource: 'page.content',
+    });
+    expect(contentRoot.layout).toMatchObject({
+      align: 'full',
+      kind: 'constrained',
+      widthPolicy: 'full-bleed',
+      innerWidthPolicy: 'content',
+    });
+    expect(contentRoot.dom).toMatchObject({
+      tagName: 'div',
+      classNames: expect.arrayContaining(['wp-block-group', 'alignfull']),
+    });
+    expect(image?.media).toMatchObject({
+      id: 42,
+      sizeSlug: 'large',
+      aspectRatio: '9/16',
+      scale: 'cover',
+      width: 640,
+      height: 960,
+    });
+    expect(image?.style?.border?.radius).toMatchObject({
+      topLeft: '50%',
+      topRight: '50%',
+    });
+  });
 });

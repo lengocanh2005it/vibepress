@@ -151,4 +151,14 @@ describe('RuntimePage template source', () => {
     expect(source).toContain('layoutContext.inFlexLayout === true');
     expect(source).toContain("isLayoutBoundImage\n          ? '100%'");
   });
+
+  it('consumes detailed runtime DOM, media, and width policy metadata', () => {
+    expect(source).toContain('node.dom?.classNames');
+    expect(source).toContain('normalizeRuntimeDomStyle(node.dom?.style)');
+    expect(source).toContain('node.media?.width');
+    expect(source).toContain('node.media?.aspectRatio');
+    expect(source).toContain('node.media?.scale');
+    expect(source).toContain('function applyRuntimeWidthPolicy(');
+    expect(source).toContain("widthPolicy === 'full-bleed'");
+  });
 });

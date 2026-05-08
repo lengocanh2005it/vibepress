@@ -46,6 +46,17 @@ describe('runtime-plan-builder template source', () => {
     expect(source).toContain('readRuntimeThemeTokens');
     expect(source).toContain("join(themeDir, 'theme.json')");
     expect(source).toContain('blockStyles: styles.blocks');
-    expect(source).toContain('themeTokens: readRuntimeThemeTokens');
+    expect(source).toContain('const themeTokens = readRuntimeThemeTokens(themeDir)');
+    expect(source).toContain('themeTokens,');
+  });
+
+  it('emits detailed runtime DOM, media, width policy, and content-slot contracts', () => {
+    expect(source).toContain('extractRuntimeDomSpec');
+    expect(source).toContain('extractRuntimeMediaSpec');
+    expect(source).toContain('deriveRuntimeWidthPolicy');
+    expect(source).toContain("widthPolicy: 'full-bleed'");
+    expect(source).toContain("innerWidthPolicy: 'content'");
+    expect(source).toContain('findRuntimeContentSlot');
+    expect(source).toContain('contentSlot');
   });
 });

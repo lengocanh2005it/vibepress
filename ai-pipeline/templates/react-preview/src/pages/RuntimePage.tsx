@@ -601,8 +601,8 @@ function renderRuntimeImage(node: RuntimeBlockNode, key: string): ReactNode | nu
     key: `${key}-img`,
     src: resolveAsset(node.src),
     alt: node.alt || '',
-    width: node.width || undefined,
-    height: node.height || undefined,
+    width: node.width || node.media?.width || undefined,
+    height: node.height || node.media?.height || undefined,
     loading: 'lazy',
     style: buildRuntimeImageStyle(node),
   });
@@ -660,14 +660,22 @@ function buildRuntimeImageStyle(node: RuntimeBlockNode): CSSProperties {
       ['alignfull', 'alignwide'].includes(className),
     );
   const declaredWidth =
-    typeof node.width === 'number' && node.width > 0 ? node.width : undefined;
+    typeof node.width === 'number' && node.width > 0
+      ? node.width
+      : typeof node.media?.width === 'number' && node.media.width > 0
+        ? node.media.width
+        : undefined;
   const sizeSlugMaxWidth = getRuntimeImageSizeMaxWidth(node);
   const aspectRatio =
-    typeof node.attrs?.aspectRatio === 'string' && node.attrs.aspectRatio.trim()
+    typeof node.media?.aspectRatio === 'string' && node.media.aspectRatio.trim()
+      ? node.media.aspectRatio.trim()
+      : typeof node.attrs?.aspectRatio === 'string' && node.attrs.aspectRatio.trim()
       ? node.attrs.aspectRatio.trim()
       : undefined;
   const objectFit =
-    typeof node.attrs?.scale === 'string' && node.attrs.scale.trim()
+    typeof node.media?.scale === 'string' && node.media.scale.trim()
+      ? node.media.scale.trim()
+      : typeof node.attrs?.scale === 'string' && node.attrs.scale.trim()
       ? node.attrs.scale.trim()
       : undefined;
 
@@ -688,13 +696,18 @@ function buildRuntimeImageStyle(node: RuntimeBlockNode): CSSProperties {
     height: 'auto',
     aspectRatio,
     objectFit: objectFit as CSSProperties['objectFit'],
+    objectPosition: node.media?.objectPosition,
     ...buildRuntimeBorderRadiusStyle(node),
   };
 }
 
 function getRuntimeImageSizeMaxWidth(node: RuntimeBlockNode): number | undefined {
   const sizeSlug =
-    typeof node.attrs?.sizeSlug === 'string' ? node.attrs.sizeSlug.trim() : '';
+    typeof node.media?.sizeSlug === 'string' && node.media.sizeSlug.trim()
+      ? node.media.sizeSlug.trim()
+      : typeof node.attrs?.sizeSlug === 'string'
+        ? node.attrs.sizeSlug.trim()
+        : '';
   const classNames = node.customClassNames ?? [];
   const classSizeSlug =
     classNames
@@ -834,7 +847,7 @@ function buildRuntimeNodeProps(
     ]),
   ];
   const style = mergeStyles(buildRuntimeNodeStyle(node), options.style);
-  const id = node.domId ?? node.wrapper?.domId;
+  const id = node.domId ?? node.dom?.domId ?? node.wrapper?.domId;
 
   if (classNames.length > 0) props.className = classNames.join(' ');
   if (style) props.style = style;
@@ -858,13 +871,16 @@ function collectRuntimeBlockClassNames(node: RuntimeBlockNode): string[] {
     ...(DEFAULT_BLOCK_CLASS_NAMES[node.blockName] ?? []),
     ...(blockAlign ? [`align${blockAlign}`] : []),
     ...(node.layout?.kind ? [`is-layout-${node.layout.kind}`] : []),
+    ...(node.dom?.classNames ?? []),
     ...(node.customClassNames ?? []),
     ...(node.style?.classNames ?? []),
   ].filter(Boolean);
 }
 
 function buildRuntimeNodeStyle(node: RuntimeBlockNode): CSSProperties | undefined {
-  const style: CSSProperties = {};
+  const style: CSSProperties = {
+    ...normalizeRuntimeDomStyle(node.dom?.style),
+  };
   const runtimeStyle = node.style;
 
   applyBoxSpacing(style, 'margin', runtimeStyle?.spacing?.margin ?? node.margin);
@@ -1089,6 +1105,32 @@ function applyLayoutStyle(
   if (layout?.alignItems && !style.alignItems) {
     style.alignItems = normalizeFlexAlignment(layout.alignItems);
   }
+  applyRuntimeWidthPolicy(style, layout?.widthPolicy);
+}
+
+function applyRuntimeWidthPolicy(
+  style: CSSProperties,
+  widthPolicy?: string,
+): void {
+  if (!widthPolicy) return;
+  if (widthPolicy === 'full-bleed') {
+    style.width = '100%';
+    style.maxWidth = 'none';
+    return;
+  }
+  if (widthPolicy === 'wide') {
+    style.width = 'min(100%, var(--wp--style--global--wide-size, 1280px))';
+    style.maxWidth = 'var(--wp--style--global--wide-size, 1280px)';
+    style.marginLeft = 'auto';
+    style.marginRight = 'auto';
+    return;
+  }
+  if (widthPolicy === 'content') {
+    style.width = '100%';
+    style.maxWidth = 'var(--wp--style--global--content-size, 1200px)';
+    style.marginLeft = 'auto';
+    style.marginRight = 'auto';
+  }
 }
 
 function getRuntimeTextAlignFromAttrs(
@@ -1149,6 +1191,9 @@ function getExplicitRuntimeTag(node: RuntimeBlockNode): string | undefined {
   if (attrTag) return attrTag.toLowerCase();
   const nodeTag = typeof node.tagName === 'string' ? node.tagName.trim() : '';
   if (nodeTag) return nodeTag.toLowerCase();
+  const domTag =
+    typeof node.dom?.tagName === 'string' ? node.dom.tagName.trim() : '';
+  if (domTag) return domTag.toLowerCase();
   const wrapperTag =
     typeof node.wrapper?.tagName === 'string' ? node.wrapper.tagName.trim() : '';
   return wrapperTag ? wrapperTag.toLowerCase() : undefined;
@@ -1180,6 +1225,22 @@ function normalizeCssValue(
     return raw.includes('-') ? `var(--wp--preset--font-size--${raw})` : raw;
   }
   return raw;
+}
+
+function normalizeRuntimeDomStyle(
+  value?: Record<string, string>,
+): CSSProperties {
+  if (!value) return {};
+  const style: Record<string, string> = {};
+  for (const [property, raw] of Object.entries(value)) {
+    if (typeof raw !== 'string' || !raw.trim()) continue;
+    const normalizedProperty = property
+      .trim()
+      .replace(/^-ms-/, 'ms-')
+      .replace(/-([a-z])/g, (_, char: string) => char.toUpperCase());
+    if (normalizedProperty) style[normalizedProperty] = raw.trim();
+  }
+  return style as CSSProperties;
 }
 
 function resolveRuntimeColor(value?: string | null): string | undefined {

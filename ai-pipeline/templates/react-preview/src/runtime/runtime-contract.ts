@@ -45,6 +45,8 @@ export interface RuntimeDimensionsSpec {
 export interface RuntimeLayoutSpec {
   kind?: string;
   align?: string;
+  widthPolicy?: 'full-bleed' | 'wide' | 'content' | 'intrinsic' | 'auto' | string;
+  innerWidthPolicy?: 'content' | 'wide' | 'full' | 'none' | string;
   columnWidth?: string;
   minimumColumnWidth?: string;
   contentSize?: string;
@@ -77,6 +79,26 @@ export interface RuntimeWrapperSpec {
   preserveWrapper?: boolean;
 }
 
+export interface RuntimeDomSpec {
+  tagName?: string;
+  domId?: string;
+  classNames?: string[];
+  style?: Record<string, string>;
+  attributes?: Record<string, string>;
+}
+
+export interface RuntimeMediaSpec {
+  id?: number;
+  src?: string;
+  alt?: string;
+  width?: number;
+  height?: number;
+  sizeSlug?: string;
+  aspectRatio?: string;
+  scale?: string;
+  objectPosition?: string;
+}
+
 export interface RuntimeImageRef {
   src: string;
   alt?: string;
@@ -102,9 +124,11 @@ export interface RuntimeBlockNode {
   blockName: string;
   sourceRef?: RuntimeSourceRef;
   attrs?: Record<string, unknown>;
+  dom?: RuntimeDomSpec;
   wrapper?: RuntimeWrapperSpec;
   style?: RuntimeStyleSpec;
   layout?: RuntimeLayoutSpec;
+  media?: RuntimeMediaSpec;
   layoutContext?: RuntimeBlockLayoutContext;
   binding?: {
     kind?: string;
@@ -255,6 +279,17 @@ export interface RuntimePageSubtreeBinding {
   sectionDebugKey?: string;
 }
 
+export interface RuntimeContentSlotSpec {
+  nodeId?: string;
+  blockName?: string;
+  bindingSource?: string;
+  wrapper?: RuntimeWrapperSpec;
+  dom?: RuntimeDomSpec;
+  layout?: RuntimeLayoutSpec;
+  style?: RuntimeStyleSpec;
+  layoutContext?: RuntimeBlockLayoutContext;
+}
+
 export interface RuntimePagePatch {
   target: {
     sourceNodeId?: string;
@@ -288,6 +323,7 @@ export interface RuntimePagePlan {
   sections: RuntimeSectionPlan[];
   blockTree: RuntimeBlockNode[];
   contentBlockTree?: RuntimeBlockNode[];
+  contentSlot?: RuntimeContentSlotSpec;
   subtreeBindings?: RuntimePageSubtreeBinding[];
   overrides?: RuntimePageOverrideSet;
 }
