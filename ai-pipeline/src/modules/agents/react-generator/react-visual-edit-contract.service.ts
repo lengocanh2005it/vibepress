@@ -350,15 +350,18 @@ function detectEditOperationFromInstruction(value: string): EditOperation {
 const PROMPT_INJECTION_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   // Instruction override attempts
   {
-    pattern: /ignore\s+(all\s+)?(previous|prior|above|earlier)\s+(instructions?|prompts?|context|rules?)/i,
+    pattern:
+      /ignore\s+(all\s+)?(previous|prior|above|earlier)\s+(instructions?|prompts?|context|rules?)/i,
     label: 'instruction override',
   },
   {
-    pattern: /forget\s+(all\s+)?(previous|prior|above|your)\s+(instructions?|prompts?|context|rules?)/i,
+    pattern:
+      /forget\s+(all\s+)?(previous|prior|above|your)\s+(instructions?|prompts?|context|rules?)/i,
     label: 'instruction override',
   },
   {
-    pattern: /\bdisregard\s+(all\s+)?(previous|prior|above|your|the)\s+(instructions?|prompts?|context|rules?)/i,
+    pattern:
+      /\bdisregard\s+(all\s+)?(previous|prior|above|your|the)\s+(instructions?|prompts?|context|rules?)/i,
     label: 'instruction override',
   },
   {
@@ -375,7 +378,8 @@ const PROMPT_INJECTION_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
     label: 'persona hijack',
   },
   {
-    pattern: /\bpretend\s+(you\s+)?(are|have)\s+(no\s+)?(restrictions?|limits?|rules?|constraints?)/i,
+    pattern:
+      /\bpretend\s+(you\s+)?(are|have)\s+(no\s+)?(restrictions?|limits?|rules?|constraints?)/i,
     label: 'persona hijack',
   },
   {
@@ -398,7 +402,8 @@ const PROMPT_INJECTION_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   },
   // System prompt extraction
   {
-    pattern: /\b(print|reveal|show|output|repeat|return)\s+(your\s+)?(system\s+prompt|instructions?|constraints?|rules?)\b/i,
+    pattern:
+      /\b(print|reveal|show|output|repeat|return)\s+(your\s+)?(system\s+prompt|instructions?|constraints?|rules?)\b/i,
     label: 'system prompt extraction',
   },
   // Structural injection — mimicking the actual userPrompt format used in code-reviewer

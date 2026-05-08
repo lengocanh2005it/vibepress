@@ -22,6 +22,13 @@ export interface RuntimeColorSpec {
   overlay?: string;
 }
 
+export interface RuntimeBorderSpec {
+  width?: string;
+  style?: string;
+  color?: string;
+  radius?: Record<string, unknown>;
+}
+
 export interface RuntimeTypographySpec {
   fontSize?: string;
   lineHeight?: string;
@@ -40,11 +47,17 @@ export interface RuntimeLayoutSpec {
   align?: string;
   columnWidth?: string;
   minimumColumnWidth?: string;
+  contentSize?: string;
+  wideSize?: string;
   justifyContent?: string;
   alignItems?: string;
   orientation?: string;
   flexWrap?: string;
   columns?: number;
+  responsive?: {
+    stackOnMobile?: boolean;
+    breakpoint?: number;
+  };
 }
 
 export interface RuntimeStyleSpec {
@@ -53,6 +66,7 @@ export interface RuntimeStyleSpec {
   spacing?: RuntimeSpacingSpec;
   typography?: RuntimeTypographySpec;
   dimensions?: RuntimeDimensionsSpec;
+  border?: RuntimeBorderSpec;
   borderRadius?: string;
   gap?: string;
 }
@@ -91,6 +105,10 @@ export interface RuntimeBlockNode {
   wrapper?: RuntimeWrapperSpec;
   style?: RuntimeStyleSpec;
   layout?: RuntimeLayoutSpec;
+  binding?: {
+    kind?: string;
+    source?: string;
+  };
   customClassNames?: string[];
   domId?: string;
   text?: string;
@@ -127,6 +145,14 @@ export interface RuntimeBlockNode {
   children?: RuntimeBlockNode[];
 }
 
+export interface RuntimeThemeTokens {
+  layout?: Record<string, unknown>;
+  colors?: Record<string, unknown>;
+  spacing?: Record<string, unknown>;
+  typography?: Record<string, unknown>;
+  blockStyles?: Record<string, unknown>;
+}
+
 export interface RuntimePageRecord {
   id: number;
   title: string;
@@ -144,6 +170,7 @@ export interface RuntimePageSource {
   kind: 'page-post-content' | 'template' | 'template-chain';
   template: string;
   slug: string;
+  templateExpanded?: boolean;
   sourceSummary?: string;
 }
 
@@ -220,11 +247,13 @@ export interface RuntimePagePlan {
   mode: 'block-centric' | 'hybrid' | 'page-content';
   fidelity: 'strict-structure' | 'best-effort';
   layoutFamily?: string;
+  themeTokens?: RuntimeThemeTokens;
   source: RuntimePageSource;
   support: RuntimePageSupport;
   dataNeeds: string[];
   sections: RuntimeSectionPlan[];
   blockTree: RuntimeBlockNode[];
+  contentBlockTree?: RuntimeBlockNode[];
   subtreeBindings?: RuntimePageSubtreeBinding[];
   overrides?: RuntimePageOverrideSet;
 }

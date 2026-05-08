@@ -45,6 +45,8 @@ describe('CodeGeneratorService', () => {
         {
           kind: 'cover',
           src: 'theme-asset:/assets/images/banner.jpg',
+          overlayColor: '#000000',
+          attrs: { dimRatio: 90 },
           minHeight: '420px',
           children: [
             {
@@ -62,6 +64,33 @@ describe('CodeGeneratorService', () => {
       'resolveAsset("theme-asset:/assets/images/banner.jpg")',
     );
     expect(code).toContain('backgroundImage: `url("${resolveAsset(');
+    expect(code).toContain(
+      'className="wp-block-cover__background has-background-dim"',
+    );
+    expect(code).toContain('opacity: 0.9');
+  });
+
+  it('renders detail-bound cover headings from the runtime item title', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'Single',
+      dataNeeds: ['postDetail'],
+      sections: [
+        {
+          type: 'cover',
+          imageSrc: 'theme-asset:/assets/images/banner.jpg',
+          dimRatio: 90,
+          minHeight: '232px',
+          contentAlign: 'center',
+          headingBinding: 'detail-title',
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain('{item?.title}');
+    expect(code).toContain('opacity: 0.9');
   });
 
   it('keeps unitless button line-height unitless', () => {
@@ -356,6 +385,189 @@ describe('CodeGeneratorService', () => {
     expect(code).toContain("flex: '0 0 70%'");
   });
 
+  it('composes shared Sidebar partial into the right column for deterministic detail pages', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'SinglePost',
+      dataNeeds: ['postDetail'],
+      layout: {
+        ...basePlan.layout,
+        contentLayout: 'sidebar-right',
+        sidebarScope: 'all-content',
+        sidebarWidth: '33.33%',
+        includes: ['Sidebar'],
+      },
+      sections: [
+        {
+          type: 'post-content',
+          showTitle: false,
+        },
+        {
+          type: 'sidebar',
+          widgets: [{ kind: 'recent-posts', title: 'Latest Posts' }],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain("import Sidebar from '../components/Sidebar';");
+    expect(code).toContain('<aside className="min-w-0"><Sidebar /></aside>');
+    expect(code).not.toContain('Latest Posts');
+  });
+
+  it('mounts shared Sidebar in hybrid template-part placeholders and suppresses duplicated standalone sidebar blocks', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'Single',
+      dataNeeds: ['postDetail'],
+      renderMode: 'hybrid',
+      layout: {
+        ...basePlan.layout,
+        contentLayout: 'sidebar-right',
+        sidebarScope: 'all-content',
+        sidebarWidth: '33.33%',
+        includes: ['Sidebar'],
+      },
+      sections: [
+        {
+          type: 'post-content',
+          showTitle: false,
+          sourceRef: { sourceNodeId: 'single::post-content::1.0.0.1' },
+        },
+        {
+          type: 'sidebar',
+          widgets: [{ kind: 'recent-posts', title: 'Latest Posts' }],
+          customClassNames: ['sticky-sidebar'],
+          sourceRef: { sourceNodeId: 'single::group::2' },
+        },
+      ],
+      blockTree: [
+        {
+          kind: 'group',
+          children: [
+            {
+              kind: 'columns',
+              children: [
+                {
+                  kind: 'column',
+                  columnWidth: '66.66%',
+                  children: [
+                    {
+                      kind: 'post-content',
+                      sourceRef: {
+                        sourceNodeId: 'single::post-content::1.0.0.1',
+                      },
+                    },
+                  ],
+                },
+                {
+                  kind: 'column',
+                  columnWidth: '33.33%',
+                  children: [
+                    {
+                      kind: 'template-part',
+                      sourceRef: {
+                        sourceNodeId: 'single::template-part::1.0.1.0',
+                      },
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+        {
+          kind: 'group',
+          customClassNames: ['sticky-sidebar'],
+          sourceRef: { sourceNodeId: 'single::group::2' },
+          children: [{ kind: 'search' }, { kind: 'latest-posts' }],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain("import Sidebar from '../components/Sidebar';");
+    expect(code).toContain('<Sidebar />');
+    expect(code).toContain("gridTemplateColumns: '66.66% 33.33%'");
+    expect(code).not.toContain('className="sticky-sidebar"');
+    expect(code).not.toContain('Latest Posts');
+  });
+
+  it('uses shared Sidebar when sidebar is represented only by layout includes and block tree placeholders', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'SinglePost',
+      dataNeeds: ['postDetail', 'posts'],
+      renderMode: 'block-centric',
+      layout: {
+        ...basePlan.layout,
+        contentLayout: 'sidebar-right',
+        sidebarScope: 'all-content',
+        sidebarWidth: '33.33%',
+        includes: ['Sidebar'],
+      },
+      sections: [
+        {
+          type: 'post-content',
+          showTitle: false,
+          sourceRef: { sourceNodeId: 'single::post-content::1.0.0.1' },
+        },
+      ],
+      blockTree: [
+        {
+          kind: 'group',
+          children: [
+            {
+              kind: 'columns',
+              children: [
+                {
+                  kind: 'column',
+                  columnWidth: '66.66%',
+                  children: [
+                    {
+                      kind: 'post-content',
+                      sourceRef: {
+                        sourceNodeId: 'single::post-content::1.0.0.1',
+                      },
+                    },
+                  ],
+                },
+                {
+                  kind: 'column',
+                  columnWidth: '33.33%',
+                  children: [
+                    {
+                      kind: 'template-part',
+                      sourceRef: {
+                        sourceNodeId: 'single::template-part::1.0.1.0',
+                      },
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+        {
+          kind: 'group',
+          customClassNames: ['sticky-sidebar'],
+          sourceRef: { sourceNodeId: 'single::group::2' },
+          children: [{ kind: 'search' }, { kind: 'latest-posts' }],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain("import Sidebar from '../components/Sidebar';");
+    expect(code).toContain('<Sidebar />');
+    expect(code).toContain("gridTemplateColumns: '66.66% 33.33%'");
+    expect(code).not.toContain('className="sticky-sidebar"');
+    expect(code).not.toContain('posts.slice(0, 5)');
+  });
+
   it('preserves source search descendants instead of collapsing wrapper sections in hybrid output', () => {
     const plan = {
       ...basePlan,
@@ -617,9 +829,14 @@ describe('CodeGeneratorService', () => {
                       kind: 'post-template',
                       blockName: 'post-template',
                       customClassNames: ['wp-block-post-template'],
-                      attrs: { layout: { type: 'grid', minimumColumnWidth: '20rem' } },
+                      attrs: {
+                        layout: { type: 'grid', minimumColumnWidth: '20rem' },
+                      },
                       children: [
-                        { kind: 'post-featured-image', blockName: 'post-featured-image' },
+                        {
+                          kind: 'post-featured-image',
+                          blockName: 'post-featured-image',
+                        },
                         {
                           kind: 'post-title',
                           blockName: 'post-title',
@@ -657,7 +874,9 @@ describe('CodeGeneratorService', () => {
     expect(code).toContain('<Sidebar />');
     expect(code).toContain('posts.map((post) => {');
     expect(code).toContain('repeat(auto-fit, minmax(20rem, 1fr))');
-    expect(code).toContain("<Link to={(item?.type === 'product' ? '/product/' : '/post/') + (item?.slug ?? '')}>");
+    expect(code).toContain(
+      "<Link to={(item?.type === 'product' ? '/product/' : '/post/') + (item?.slug ?? '')}>",
+    );
     expect(code).not.toContain('min(6.5rem, 8vw)');
   });
 
@@ -681,6 +900,7 @@ describe('CodeGeneratorService', () => {
 
     expect(code).toContain('Go to home page');
     expect(code).toContain('<form role="search"');
+    expect(code).not.toContain('/api/posts');
   });
 
   it('does not infer pageDetail from non-detail transactional prose blocks', () => {
@@ -897,7 +1117,9 @@ describe('CodeGeneratorService', () => {
 
     const code = service.generate(plan);
 
-    expect(code).toContain('post.featuredImage && <img');
+    expect(code).toContain(
+      'post.featuredImage && <Link to={`/post/${post.slug}`} className="block"><img',
+    );
   });
 
   it('applies source post-list featured image radius exactly', () => {
@@ -998,9 +1220,89 @@ describe('CodeGeneratorService', () => {
       blockTree: [
         {
           kind: 'group',
-          children: [
-            { kind: 'post-content' },
-            { kind: 'post-comments-form' },
+          children: [{ kind: 'post-content' }, { kind: 'post-comments-form' }],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain(
+      'renderRichTextChildren(item.content, "post-content")',
+    );
+    expect(code).toContain('className="post-content prose max-w-none');
+    expect(code).toContain('comment.content');
+    expect(code).toContain('id="commentform"');
+    expect(code).toContain('onSubmit={handleCommentSubmit}');
+    expect(code).toContain('id="author" name="author"');
+    expect(code).toContain('id="email" name="email"');
+    expect(code).toContain('type="submit"');
+  });
+
+  it('keeps single post sidebar widgets inside the all-content two-column shell', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'Single',
+      dataNeeds: ['postDetail', 'comments', 'posts'],
+      layout: {
+        ...basePlan.layout,
+        contentLayout: 'sidebar-right',
+        sidebarScope: 'all-content',
+      },
+      sections: [
+        {
+          type: 'post-title',
+          level: 1,
+        },
+        {
+          type: 'post-content',
+          showTitle: false,
+          showAuthor: false,
+          showDate: false,
+          showCategories: false,
+        },
+        {
+          type: 'comments',
+          showForm: true,
+          requireName: true,
+          requireEmail: true,
+        },
+        {
+          type: 'sidebar',
+          customClassNames: ['sticky-sidebar'],
+          widgetLayout: 'stacked-cards',
+          widgets: [
+            {
+              kind: 'search',
+              buttonUseIcon: true,
+              buttonPosition: 'button-inside',
+              cardStyle: {
+                background: '#F4F4F4',
+                padding: '1rem 20px',
+                borderRadius: '10px',
+              },
+            },
+            {
+              kind: 'recent-posts',
+              title: 'Latest Posts',
+              titleLevel: 4,
+              maxItems: 5,
+              displayFeaturedImage: true,
+              featuredImageAlign: 'left',
+              featuredImageSizeWidth: 75,
+              featuredImageSizeHeight: 75,
+              bodyStyle: {
+                fontSize: '18px',
+                fontWeight: '600',
+              },
+              cardStyle: {
+                background: '#F4F4F4',
+                padding: '1rem 20px',
+                borderRadius: '10px',
+              },
+            },
+            { kind: 'categories', title: 'Categories' },
+            { kind: 'tags', title: 'Tags' },
           ],
         },
       ],
@@ -1008,13 +1310,75 @@ describe('CodeGeneratorService', () => {
 
     const code = service.generate(plan);
 
-    expect(code).toContain('renderRichTextChildren(item.content, "post-content")');
-    expect(code).toContain('comment.content');
-    expect(code).toContain('id="commentform"');
-    expect(code).toContain('onSubmit={handleCommentSubmit}');
-    expect(code).toContain('id="author" name="author"');
-    expect(code).toContain('id="email" name="email"');
-    expect(code).toContain('type="submit"');
+    expect(code).toContain('Full Main Column With Sidebar');
+    expect(code).toContain('<aside className="min-w-0">');
+    expect(code).toContain('className="flex flex-col gap-6 sticky-sidebar"');
+    expect(code).toContain('aria-label="Search"');
+    expect(code).toContain('placeholder="Search"');
+    expect(code).toContain('<svg viewBox="0 0 24 24"');
+    expect(code).toContain('Latest Posts');
+    expect(code).toContain(
+      'renderRichTextChildren(post.excerpt ?? \'\', "sidebar-post-excerpt")',
+    );
+    expect(code).toContain("marginTop: 'var(--wp--preset--spacing--30)'");
+    expect(code).toContain(
+      '<span aria-hidden="true" className="shrink-0 text-[#666666]">&gt;</span>',
+    );
+    expect(code).toContain(
+      "const fontSize = (0.95 + ratio * 0.45).toFixed(2) + 'rem';",
+    );
+    expect(code).not.toContain('{/* Sidebar */}');
+  });
+
+  it('renders profolio archive cards with linked media, meta icons, and read more buttons', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'Archive',
+      dataNeeds: ['posts'],
+      sections: [
+        {
+          type: 'post-list',
+          layout: 'grid-2',
+          showDate: true,
+          showAuthor: true,
+          showCategory: false,
+          showExcerpt: true,
+          showFeaturedImage: true,
+          authorIcon: 'user',
+          dateIcon: 'calendar',
+          showReadMore: true,
+          readMoreLabel: 'Read More',
+          cardStyle: {
+            border: '1px solid #e0e0e0',
+            borderRadius: '10px',
+          },
+          contentPaddingStyle:
+            'var(--wp--preset--spacing--10) var(--wp--preset--spacing--10) var(--wp--preset--spacing--20) var(--wp--preset--spacing--10)',
+          readMoreButtonStyle: {
+            background: '#2f4138',
+            color: '#ffffff',
+            borderRadius: '8px',
+            padding: '0.75rem 1.25rem',
+          },
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain(
+      '<Link to={`/post/${post.slug}`} className="block"><img',
+    );
+    expect(code).toContain("border: '1px solid #e0e0e0'");
+    expect(code).toContain("borderRadius: '10px'");
+    expect(code).toContain(
+      "padding: 'var(--wp--preset--spacing--10) var(--wp--preset--spacing--10) var(--wp--preset--spacing--20) var(--wp--preset--spacing--10)'",
+    );
+    expect(code).toContain('{post.author}</Link>');
+    expect(code).not.toContain('by {post.author}');
+    expect(code).toContain('Read More');
+    expect(code).toContain('fill="currentColor"');
+    expect(code).toContain('<path d="M8 2v4"></path>');
   });
 
   it('renders rich text sections through explicit JSX wrappers instead of dangerouslySetInnerHTML', () => {
@@ -1506,9 +1870,7 @@ describe('CodeGeneratorService', () => {
     expect(code).toContain("borderColor: '#F5B731'");
     expect(code).not.toContain("lineHeight: '1.15px'");
     expect(code).toContain("display: 'grid'");
-    expect(code).toContain(
-      "gridTemplateColumns: 'auto minmax(0, 1fr) auto'",
-    );
+    expect(code).toContain("gridTemplateColumns: 'auto minmax(0, 1fr) auto'");
     expect(code).toContain("flexWrap: 'nowrap'");
     expect(code).toContain("maxWidth: '1200px'");
     expect(code).toContain("paddingLeft: '0'");
@@ -1549,7 +1911,7 @@ describe('CodeGeneratorService', () => {
     );
     expect(code).toContain("color: '#000'");
     expect(code).toContain("position: 'fixed'");
-    expect(code).toContain("inset: 0");
+    expect(code).toContain('inset: 0');
   });
 
   it('does not add fallback text underlines to header navigation links', () => {
@@ -1895,9 +2257,7 @@ describe('CodeGeneratorService', () => {
     });
 
     expect(code).toContain("display: 'grid'");
-    expect(code).toContain(
-      "gridTemplateColumns: 'auto minmax(0, 1fr) auto'",
-    );
+    expect(code).toContain("gridTemplateColumns: 'auto minmax(0, 1fr) auto'");
     expect(code).toContain("flexWrap: 'nowrap'");
     expect(code).toContain("maxWidth: '1200px'");
     expect(code).toContain("marginLeft: 'auto'");

@@ -264,6 +264,7 @@ export interface CoverSection extends BaseSection {
   dimRatio: number; // 0–100
   minHeight: string; // e.g. "500px"
   heading?: string;
+  headingBinding?: 'detail-title';
   subheading?: string;
   headingCustomClassNames?: string[];
   subheadingCustomClassNames?: string[];
@@ -301,6 +302,14 @@ export interface PostListSection extends BaseSection {
   metaColumnWidth?: string;
   splitCategoryLine?: boolean;
   categoryPrefix?: string;
+  cardStyle?: SectionCardStyle;
+  contentPaddingStyle?: string;
+  showReadMore?: boolean;
+  readMoreLabel?: string;
+  readMoreButtonStyle?: SectionButtonStyle;
+  readMoreIcon?: 'arrow-right';
+  authorIcon?: 'user';
+  dateIcon?: 'calendar';
 }
 
 export interface CardGridSection extends BaseSection {
@@ -502,44 +511,54 @@ export interface SidebarLinkItem {
   url?: string;
 }
 
+interface SidebarWidgetBase {
+  title?: string;
+  titleLevel?: 1 | 2 | 3 | 4 | 5 | 6;
+  titleStyle?: TypographyStyle;
+  bodyStyle?: TypographyStyle;
+  cardStyle?: SectionCardStyle;
+  customClassNames?: string[];
+  maxItems?: number;
+}
+
 export type SidebarWidget =
-  | {
+  | (SidebarWidgetBase & {
       kind: 'search';
-      title?: string;
       placeholder?: string;
       buttonLabel?: string;
-    }
-  | {
+      buttonUseIcon?: boolean;
+      buttonPosition?: 'button-inside' | 'button-outside';
+    })
+  | (SidebarWidgetBase & {
       kind: 'author-bio';
-      title?: string;
       description?: string;
       showAvatar?: boolean;
-    }
-  | {
+    })
+  | (SidebarWidgetBase & {
       kind: 'categories';
-      title?: string;
       showCounts?: boolean;
-    }
-  | {
+    })
+  | (SidebarWidgetBase & {
       kind: 'tags';
-      title?: string;
       showCounts?: boolean;
-    }
-  | {
+    })
+  | (SidebarWidgetBase & {
       kind: 'navigation';
-      title?: string;
       description?: string;
       menuSlug?: string;
       links?: SidebarLinkItem[];
-    }
-  | {
+    })
+  | (SidebarWidgetBase & {
       kind: 'pages-list';
-      title?: string;
-    }
-  | {
+    })
+  | (SidebarWidgetBase & {
       kind: 'recent-posts';
-      title?: string;
-    };
+      displayFeaturedImage?: boolean;
+      featuredImageAlign?: 'left' | 'top';
+      featuredImageSizeWidth?: number;
+      featuredImageSizeHeight?: number;
+      excerptLength?: number;
+    });
 
 export interface BreadcrumbSection extends BaseSection {
   type: 'breadcrumb';
@@ -550,6 +569,8 @@ export interface SidebarSection extends BaseSection {
   title?: string;
   widgets: SidebarWidget[];
   maxItems?: number;
+  widgetLayout?: 'single-card' | 'stacked-cards';
+  widgetGapStyle?: string;
 }
 
 export interface ModalSection extends BaseSection {

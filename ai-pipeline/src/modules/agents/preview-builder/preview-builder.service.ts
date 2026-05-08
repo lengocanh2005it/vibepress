@@ -545,9 +545,10 @@ ${routesBlock}
 
     // server/.env — DB credentials + port
     const previewBase = `/preview/${jobId}/`;
+    const resolvedThemeDir = this.resolveServerThemeDir(themeDir);
     await writeFile(
       join(rootDir, 'server', '.env'),
-      `API_PORT=${apiPort}\nDB_HOST=${dbCreds.host}\nDB_PORT=${dbCreds.port}\nDB_NAME=${dbCreds.dbName}\nDB_USER=${dbCreds.user}\nDB_PASSWORD=${dbCreds.password}\nPREVIEW_BASE=${previewBase}\n${siteInfo?.siteUrl ? `SITE_URL=${siteInfo.siteUrl}\n` : ''}${copiedLogoPublicPath ? `SITE_LOGO_URL=${previewBase}${copiedLogoPublicPath.replace(/^\//, '')}\n` : ''}${themeDir ? `THEME_DIR=${themeDir}\n` : ''}`,
+      `API_PORT=${apiPort}\nDB_HOST=${dbCreds.host}\nDB_PORT=${dbCreds.port}\nDB_NAME=${dbCreds.dbName}\nDB_USER=${dbCreds.user}\nDB_PASSWORD=${dbCreds.password}\nPREVIEW_BASE=${previewBase}\n${siteInfo?.siteUrl ? `SITE_URL=${siteInfo.siteUrl}\n` : ''}${copiedLogoPublicPath ? `SITE_LOGO_URL=${previewBase}${copiedLogoPublicPath.replace(/^\//, '')}\n` : ''}${resolvedThemeDir ? `THEME_DIR=${resolvedThemeDir}\n` : ''}`,
     );
 
     // 6. Reuse cached template dependencies, install only on cache miss
@@ -801,6 +802,11 @@ ${fontEntries}
     }
 
     await this.applyThemeStylesheetCss(frontendDir, themeDir);
+  }
+
+  private resolveServerThemeDir(themeDir?: string | null): string | null {
+    const normalized = String(themeDir ?? '').trim();
+    return normalized ? resolve(normalized) : null;
   }
 
   private async injectFontAwesomeStylesheetLink(
@@ -1172,6 +1178,11 @@ ${fontEntries}
       '  max-width: 100vw;',
       '  margin-left: calc(50% - 50vw);',
       '  margin-right: calc(50% - 50vw);',
+      '}',
+      '.wp-site-blocks .profolio-fse-banner-wrapper > div[class*="max-w-"][class*="1200px"] {',
+      '  padding-left: min(6.5rem, 8vw) !important;',
+      '  padding-right: min(6.5rem, 8vw) !important;',
+      '  box-sizing: border-box;',
       '}',
     ].join('\n');
   }
@@ -3449,7 +3460,12 @@ ${fontEntries}
     }
     if (
       path === '/post/:slug' &&
-      ['single', 'singlewithsidebar'].includes(componentName)
+      [
+        'single',
+        'singlepost',
+        'singlewithsidebar',
+        'singlepostwithsidebar',
+      ].includes(componentName)
     ) {
       return '/post/:slug';
     }
