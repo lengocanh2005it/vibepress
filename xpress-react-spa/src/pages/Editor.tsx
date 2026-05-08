@@ -20,6 +20,7 @@ import type {
   DocumentCaptureRect,
   CaptureNormalizedRect,
   Capture,
+  CaptureReplacementImageAsset,
 } from "../types/capture";
 
 interface WpPage {
@@ -47,7 +48,26 @@ interface Annotation {
   colorClasses: string;
 }
 
+interface PendingChatImage {
+  id: string;
+  localUrl: string;
+  fileName: string;
+  mimeType: string;
+  cloudUrl: string | null;
+  cloudMeta: {
+    provider: "cloudinary" | "imagekit";
+    publicId?: string;
+    bytes?: number;
+    width?: number;
+    height?: number;
+  } | null;
+  uploading: boolean;
+  error: string | null;
+}
+
 type SupportedLanguage = "vi" | "en";
+
+const MAX_CHAT_IMAGE_BYTES = 10 * 1024 * 1024;
 
 const stripVietnameseMarks = (value: string) =>
   value
@@ -98,7 +118,7 @@ const detectUnsupportedEditRequestReason = (value: string) => {
     /\b(add|insert|create|introduce|implement|them|chen|tao moi|bo sung)\b/.test(
       normalized,
     ) &&
-    /\b(section|component|widget|feature|module|carousel|slider|modal|popup|tabs|accordion|faq|newsletter|form|chat|chatbot)\b/.test(
+    /\b(component|widget|feature|module|carousel|slider|modal|popup|tabs|accordion|faq|newsletter|form|chat|chatbot)\b/.test(
       normalized,
     )
   ) {
@@ -255,20 +275,20 @@ const EDITOR_MESSAGES: Record<
     en: 'When captures are attached, the main prompt must still be a clear additional instruction. Inputs like "hello" or "test" are rejected.',
   },
   supplementalPromptTargetRequired: {
-    vi: "Khi đã có capture, prompt chính chỉ nên bổ sung ngữ cảnh cho đúng page hoặc khu vực và vẫn phải nằm trong 4 nhóm: nội dung, background, color, layout.",
-    en: "When captures are attached, keep the main prompt tied to a specific page or area and limit it to content, background, color, or layout changes.",
+    vi: "Khi đã có capture, prompt chính chỉ nên bổ sung ngữ cảnh cho đúng page hoặc khu vực và vẫn phải nằm trong scope: nội dung, color/background, thay ảnh, hoặc thêm một section đơn giản.",
+    en: "When captures are attached, keep the main prompt tied to a specific page or area and limit it to content, color/background, image replacement, or one simple section.",
   },
   mainPromptRequired: {
-    vi: "Hãy nhập một yêu cầu migrate rõ ràng. Nếu kèm chỉnh sửa, chỉ dùng 4 nhóm: nội dung, background, color hoặc layout.",
-    en: "Add a clear migration prompt. Any requested edit must stay within content, background, color, or layout changes.",
+    vi: "Hãy nhập một yêu cầu migrate rõ ràng. Nếu kèm chỉnh sửa, chỉ dùng scope: nội dung, color/background, thay ảnh, hoặc thêm một section đơn giản.",
+    en: "Add a clear migration prompt. Any requested edit must stay within content, color/background, image replacement, or one simple section.",
   },
   focusTargetActionRequired: {
-    vi: "Nếu bạn nhắc đến một page như Home, hãy nói rõ phần nào trên đó cần thay đổi và thay đổi đó phải thuộc content, background, color hoặc layout.",
-    en: "When you mention a page like Home, also describe what should change there, limited to content, background, color, or layout.",
+    vi: "Nếu bạn nhắc đến một page như Home, hãy nói rõ phần nào cần thay đổi và thay đổi đó phải thuộc content, color/background, thay ảnh, hoặc thêm một section đơn giản.",
+    en: "When you mention a page like Home, also describe what should change there, limited to content, color/background, image replacement, or one simple section.",
   },
   unclearIntent: {
-    vi: "Hãy mô tả yêu cầu migrate toàn site, hoặc một chỉnh sửa rõ ràng trên page/khu vực cụ thể thuộc 4 nhóm: nội dung, background, color, layout.",
-    en: "Describe either the full-site migration or a clear page-level edit limited to content, background, color, or layout.",
+    vi: "Hãy mô tả yêu cầu migrate toàn site, hoặc một chỉnh sửa rõ ràng trên page/khu vực cụ thể thuộc scope: nội dung, color/background, thay ảnh, hoặc thêm một section đơn giản.",
+    en: "Describe either the full-site migration or a clear page-level edit limited to content, color/background, image replacement, or one simple section.",
   },
   saveCaptureNoteRequired: {
     vi: "Hãy thêm một yêu cầu chỉnh sửa rõ ràng trước khi lưu capture này.",
@@ -295,15 +315,15 @@ const EDITOR_MESSAGES: Record<
     en: "Failed to start AI pipeline.",
   },
   unsupportedEditOperation: {
-    vi: "Luồng edit hiện chỉ hỗ trợ 4 nhóm thay đổi: đổi nội dung, đổi background, đổi color, hoặc đổi layout. Các yêu cầu thêm/xóa/thay section, thêm feature mới, hoặc đổi typography hiện chưa được hỗ trợ.",
-    en: "The current edit flow only supports content, background, color, or layout changes. Adding/removing/replacing sections, adding new features, or typography-only edits are not supported.",
+    vi: "Luồng edit hiện chỉ hỗ trợ: đổi nội dung, đổi color/background, thay ảnh bằng ảnh upload, hoặc thêm một section đơn giản. Thêm feature/component phức tạp, xóa/thay section, hoặc đổi typography riêng lẻ chưa được hỗ trợ.",
+    en: "The current edit flow only supports content, color/background, uploaded image replacement, or adding one simple section. Complex features/components, removing/replacing sections, or typography-only edits are not supported.",
   },
   outOfScope: {
-    vi: "Yêu cầu này không giống một tác vụ migrate site hoặc một chỉnh sửa UI thuộc 4 nhóm được hỗ trợ.",
+    vi: "Yêu cầu này không giống một tác vụ migrate site hoặc một chỉnh sửa UI thuộc scope được hỗ trợ.",
     en: "This prompt does not look like a site migration or a supported UI edit.",
   },
   invalidEditRequest: {
-    vi: "Không thể hiểu yêu cầu này như một chỉ dẫn migrate hoặc chỉnh sửa hợp lệ trong 4 nhóm được hỗ trợ.",
+    vi: "Không thể hiểu yêu cầu này như một chỉ dẫn migrate hoặc chỉnh sửa hợp lệ trong scope được hỗ trợ.",
     en: "The request could not be understood as a valid migration instruction or a supported edit request.",
   },
 };
@@ -347,29 +367,29 @@ const getChatHelperContent = (
     return language === "vi"
       ? {
           title: "Supported edit scope",
-          body: 'Mỗi capture nên mô tả một thay đổi cụ thể thuộc 1 trong 4 nhóm: nội dung, background, color hoặc layout. Ví dụ: "Đổi nền section này sang xanh nhạt" hoặc "Giảm khoảng cách giữa 2 cột".',
+          body: 'Mỗi capture nên mô tả một thay đổi cụ thể: đổi nội dung, color/background, thay ảnh bằng ảnh upload, hoặc thêm một section đơn giản. Ví dụ: "Đổi nền section này sang xanh nhạt".',
         }
       : {
           title: "Supported edit scope",
-          body: 'Each capture should describe one concrete change within the 4 supported groups: content, background, color, or layout. Example: "Change this section background to light green" or "Reduce the gap between these two columns".',
+          body: 'Each capture should describe one concrete change: content, color/background, uploaded image replacement, or adding one simple section. Example: "Change this section background to light green".',
         };
   }
 
   return language === "vi"
     ? {
         title: "Main prompt",
-        body: 'Hãy mô tả migrate toàn site. Nếu muốn kèm chỉnh sửa, chỉ yêu cầu content/background/color/layout. Ví dụ: "Migrate toàn bộ site sang React và đổi nền hero ở trang Home sang xanh nhạt".',
+        body: 'Hãy mô tả migrate toàn site. Nếu muốn kèm chỉnh sửa, chỉ yêu cầu content, color/background, thay ảnh upload, hoặc thêm một section đơn giản.',
       }
     : {
         title: "Main prompt",
-        body: 'Describe the full-site migration. If you also want edits, keep them limited to content, background, color, or layout. Example: "Migrate the full site to React and change the hero background on the Home page to light green".',
+        body: 'Describe the full-site migration. If you also want edits, keep them limited to content, color/background, uploaded image replacement, or one simple section.',
       };
 };
 
 const getChatInputPlaceholder = (language: SupportedLanguage) =>
   language === "vi"
-    ? "Mô tả migrate hoặc chỉnh sửa thuộc content/background/color/layout..."
-    : "Describe the migration or any content/background/color/layout edit...";
+    ? "Mô tả migrate, đổi nội dung/màu/nền, thay ảnh, hoặc thêm section đơn giản..."
+    : "Describe migration, content/color/background edits, image replacement, or one simple section...";
 
 const Editor: React.FC = () => {
   const navigate = useNavigate();
@@ -394,6 +414,8 @@ const Editor: React.FC = () => {
   const [captures, setCaptures] = useState<Capture[]>([]);
   const [selectedCaptureIds, setSelectedCaptureIds] = useState<string[]>([]);
   const [chatCaptures, setChatCaptures] = useState<Capture[]>([]);
+  const [chatImages, setChatImages] = useState<PendingChatImage[]>([]);
+  const [captureImages, setCaptureImages] = useState<PendingChatImage[]>([]);
   const [previewCapture, setPreviewCapture] = useState<Capture | null>(null);
   const [isSubmittingCapture, setIsSubmittingCapture] = useState(false);
   const [isSendingAiRequest, setIsSendingAiRequest] = useState(false);
@@ -402,6 +424,8 @@ const Editor: React.FC = () => {
   const [rightTab, setRightTab] = useState<"captures" | "notes">("captures");
   const overlayRef = useRef<HTMLDivElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const chatImageInputRef = useRef<HTMLInputElement>(null);
+  const captureImageInputRef = useRef<HTMLInputElement>(null);
 
   const [annotations, setAnnotations] = useState<Annotation[]>([
     {
@@ -495,6 +519,8 @@ const Editor: React.FC = () => {
   };
 
   const cancelCaptureFlow = () => {
+    captureImages.forEach((image) => URL.revokeObjectURL(image.localUrl));
+    setCaptureImages([]);
     setIsCapturing(false);
     setSelection(null);
     setShowCommentPopup(false);
@@ -531,6 +557,203 @@ const Editor: React.FC = () => {
       return mimeType;
     }
     return "image/png";
+  };
+
+  const handleChatImageSelected = async (file: File) => {
+    if (!file.type.startsWith("image/")) {
+      showToast("Chỉ hỗ trợ upload file ảnh.", "warning");
+      return;
+    }
+    if (file.size > MAX_CHAT_IMAGE_BYTES) {
+      showToast("Ảnh tối đa 10MB. Hãy nén ảnh hoặc chọn ảnh nhỏ hơn.", "warning");
+      return;
+    }
+
+    const id = crypto.randomUUID();
+    const localUrl = URL.createObjectURL(file);
+    setChatImages((prev) => [
+      ...prev,
+      {
+        id,
+        localUrl,
+        fileName: file.name,
+        mimeType: file.type,
+        cloudUrl: null,
+        cloudMeta: null,
+        uploading: true,
+        error: null,
+      },
+    ]);
+
+    try {
+      const base64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = typeof reader.result === "string" ? reader.result : "";
+          resolve(result.split(",")[1] || "");
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+
+      const response = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/upload-image`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          data: base64,
+          fileName: file.name,
+          mimeType: file.type,
+        }),
+      });
+      const data = (await response.json().catch(() => null)) as {
+        url?: string;
+        provider?: "cloudinary" | "imagekit";
+        publicId?: string;
+        bytes?: number;
+        width?: number;
+        height?: number;
+        message?: string;
+      } | null;
+
+      if (!response.ok || !data?.url || !data.provider) {
+        throw new Error(data?.message || "Upload failed");
+      }
+
+      setChatImages((prev) =>
+        prev.map((img) =>
+          img.id === id
+            ? {
+                ...img,
+                cloudUrl: data.url!,
+                cloudMeta: {
+                  provider: data.provider!,
+                  publicId: data.publicId,
+                  bytes: data.bytes,
+                  width: data.width,
+                  height: data.height,
+                },
+                uploading: false,
+              }
+            : img,
+        ),
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Upload failed";
+      setChatImages((prev) =>
+        prev.map((img) =>
+          img.id === id
+            ? { ...img, uploading: false, error: message }
+            : img,
+        ),
+      );
+    }
+  };
+
+  const handleCaptureImageSelected = async (file: File) => {
+    if (!file.type.startsWith("image/")) {
+      showToast("Chỉ hỗ trợ upload file ảnh.", "warning");
+      return;
+    }
+    if (file.size > MAX_CHAT_IMAGE_BYTES) {
+      showToast("Ảnh tối đa 10MB. Hãy nén ảnh hoặc chọn ảnh nhỏ hơn.", "warning");
+      return;
+    }
+
+    const id = crypto.randomUUID();
+    const localUrl = URL.createObjectURL(file);
+    setCaptureImages((prev) => [
+      ...prev,
+      {
+        id,
+        localUrl,
+        fileName: file.name,
+        mimeType: file.type,
+        cloudUrl: null,
+        cloudMeta: null,
+        uploading: true,
+        error: null,
+      },
+    ]);
+
+    try {
+      const base64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = typeof reader.result === "string" ? reader.result : "";
+          resolve(result.split(",")[1] || "");
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+
+      const response = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/upload-image`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          data: base64,
+          fileName: file.name,
+          mimeType: file.type,
+        }),
+      });
+      const data = (await response.json().catch(() => null)) as {
+        url?: string;
+        provider?: "cloudinary" | "imagekit";
+        publicId?: string;
+        bytes?: number;
+        width?: number;
+        height?: number;
+        message?: string;
+      } | null;
+
+      if (!response.ok || !data?.url || !data.provider) {
+        throw new Error(data?.message || "Upload failed");
+      }
+
+      setCaptureImages((prev) =>
+        prev.map((img) =>
+          img.id === id
+            ? {
+                ...img,
+                cloudUrl: data.url!,
+                cloudMeta: {
+                  provider: data.provider!,
+                  publicId: data.publicId,
+                  bytes: data.bytes,
+                  width: data.width,
+                  height: data.height,
+                },
+                uploading: false,
+              }
+            : img,
+        ),
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Upload failed";
+      setCaptureImages((prev) =>
+        prev.map((img) =>
+          img.id === id
+            ? { ...img, uploading: false, error: message }
+            : img,
+        ),
+      );
+    }
+  };
+
+  const toReplacementImageAsset = (
+    image: PendingChatImage,
+  ): CaptureReplacementImageAsset | null => {
+    if (!image.cloudUrl || !image.cloudMeta) return null;
+    return {
+      id: image.id,
+      provider: image.cloudMeta.provider,
+      fileName: image.fileName,
+      publicUrl: image.cloudUrl,
+      mimeType: image.mimeType,
+      bytes: image.cloudMeta.bytes,
+      width: image.cloudMeta.width,
+      height: image.cloudMeta.height,
+      providerAssetId: image.cloudMeta.publicId,
+    };
   };
 
   const isMeaningfulNoCapturePrompt = (value: string) => {
@@ -690,9 +913,33 @@ const Editor: React.FC = () => {
     prompt: string,
     language: SupportedLanguage,
     capturesForAi: Capture[],
+    imagesForAi: PendingChatImage[],
   ) => {
     const primaryPage = capturesForAi[0]?.page;
     const primaryCapture = capturesForAi[0];
+    const manualImageAssets = imagesForAi
+      .filter((image) => image.cloudUrl && image.cloudMeta)
+      .map((image) => ({
+        provider: image.cloudMeta!.provider,
+        fileName: image.fileName,
+        publicUrl: image.cloudUrl!,
+        mimeType: image.mimeType,
+        bytes: image.cloudMeta!.bytes,
+        width: image.cloudMeta!.width,
+        height: image.cloudMeta!.height,
+        providerAssetId: image.cloudMeta!.publicId,
+      }));
+    const captureImageAssets = capturesForAi.flatMap((capture) =>
+      capture.replacementImages ?? [],
+    );
+    const imageAssets = Array.from(
+      new Map(
+        [...manualImageAssets, ...captureImageAssets].map((asset) => [
+          asset.publicUrl,
+          asset,
+        ]),
+      ).values(),
+    );
 
     return {
       ...(prompt ? { prompt } : {}),
@@ -722,6 +969,7 @@ const Editor: React.FC = () => {
             attachments: capturesForAi.map(buildAiAttachmentPayload),
           }
         : {}),
+      ...(imageAssets.length > 0 ? { imageAssets } : {}),
     };
   };
 
@@ -738,6 +986,8 @@ const Editor: React.FC = () => {
   const sendChatMessage = async () => {
     const trimmedPrompt = chatInput.trim();
     const hasCaptureInstructions = chatCaptures.length > 0;
+    const uploadingImage = chatImages.some((image) => image.uploading);
+    const failedImage = chatImages.find((image) => image.error);
     const requestLanguage = detectRequestLanguage(
       trimmedPrompt,
       chatCaptures.map((capture) => capture.comment),
@@ -747,6 +997,25 @@ const Editor: React.FC = () => {
 
     if (!hasCaptureInstructions && !trimmedPrompt) {
       showToast(getEditorMessage(requestLanguage, "mainPromptRequired"));
+      return;
+    }
+
+    if (uploadingImage) {
+      showToast(
+        requestLanguage === "vi"
+          ? "Đợi ảnh upload xong trước khi gửi cho AI."
+          : "Wait for image upload to finish before sending to AI.",
+        "warning",
+      );
+      return;
+    }
+
+    if (failedImage) {
+      showToast(
+        requestLanguage === "vi"
+          ? `Ảnh "${failedImage.fileName}" upload lỗi. Xóa ảnh đó hoặc upload lại.`
+          : `Image "${failedImage.fileName}" failed to upload. Remove it or upload again.`,
+      );
       return;
     }
 
@@ -773,6 +1042,7 @@ const Editor: React.FC = () => {
       trimmedPrompt,
       requestLanguage,
       chatCaptures,
+      chatImages,
     );
 
     console.log("Sending AI request with body:", requestBody);
@@ -781,6 +1051,7 @@ const Editor: React.FC = () => {
 
       setChatInput("");
       setChatCaptures([]);
+      setChatImages([]);
       console.log("AI process started with job ID:", data.jobId);
       await deleteCapturesBySite(siteId);
       navigate("/app/editor/split-view", {
@@ -1168,6 +1439,16 @@ const Editor: React.FC = () => {
   const handleSaveCapture = async () => {
     if (!selection) return;
     const captureLanguage = detectRequestLanguage("", [captureComment]);
+    const uploadingImage = captureImages.some((image) => image.uploading);
+    const failedImage = captureImages.find((image) => image.error);
+    if (uploadingImage) {
+      showToast("Đợi ảnh upload xong trước khi lưu capture.", "warning");
+      return;
+    }
+    if (failedImage) {
+      showToast(`Ảnh "${failedImage.fileName}" upload lỗi. Xóa ảnh đó hoặc upload lại.`);
+      return;
+    }
     if (detectUnsupportedEditRequestReason(captureComment)) {
       showToast(getEditorMessage(captureLanguage, "unsupportedEditOperation"));
       return;
@@ -1207,13 +1488,18 @@ const Editor: React.FC = () => {
         page: captureSnapshot.page,
         selection: captureSnapshot.selection,
         geometry: captureSnapshot.geometry,
+        replacementImages: captureImages
+          .map(toReplacementImageAsset)
+          .filter((image): image is CaptureReplacementImageAsset => Boolean(image)),
       };
       await saveCapture(siteId,captureObject);
       setCaptures((prev) => [captureObject, ...prev]);
+      setCapturesOpen(true);
     } finally {
       setIsSubmittingCapture(false);
       setShowCommentPopup(false);
       setCaptureComment("");
+      setCaptureImages([]);
       setSelection(null);
       setIsCapturing(false);
     }
@@ -1301,6 +1587,22 @@ const Editor: React.FC = () => {
     );
   };
 
+  const handleRemoveChatImage = (imageId: string) => {
+    setChatImages((prev) => {
+      const image = prev.find((item) => item.id === imageId);
+      if (image) URL.revokeObjectURL(image.localUrl);
+      return prev.filter((item) => item.id !== imageId);
+    });
+  };
+
+  const handleRemoveCaptureImage = (imageId: string) => {
+    setCaptureImages((prev) => {
+      const image = prev.find((item) => item.id === imageId);
+      if (image) URL.revokeObjectURL(image.localUrl);
+      return prev.filter((item) => item.id !== imageId);
+    });
+  };
+
   const handleSelectAllCaptures = () => {
     setSelectedCaptureIds(captures.map((capture) => capture.id));
   };
@@ -1323,9 +1625,15 @@ const Editor: React.FC = () => {
   );
   const chatHelper = getChatHelperContent(helperLanguage, isCaptureMode);
   const chatInputPlaceholder = getChatInputPlaceholder(helperLanguage);
+  const chatImageUploading = chatImages.some((image) => image.uploading);
+  const chatImageFailed = chatImages.some((image) => image.error);
+  const captureImageUploading = captureImages.some((image) => image.uploading);
+  const captureImageFailed = captureImages.some((image) => image.error);
   const canSendChatMessage =
     !!siteId &&
     !isSendingAiRequest &&
+    !chatImageUploading &&
+    !chatImageFailed &&
     (isCaptureMode ? chatCaptures.length > 0 : !!chatInput.trim());
 
   return (
@@ -1535,7 +1843,7 @@ const Editor: React.FC = () => {
                 const popupPosition = getCommentPopupPosition(r);
                 return (
                   <div
-                    className="absolute z-40 bg-white rounded-2xl shadow-xl border border-[#e8e6df] p-4 w-72"
+                    className="absolute z-40 bg-white rounded-2xl shadow-xl border border-[#e8e6df] p-4 w-80"
                     style={{
                       left: popupPosition.left,
                       top: popupPosition.top,
@@ -1546,17 +1854,83 @@ const Editor: React.FC = () => {
                       Describe the change for this area
                     </p>
                     <p className="mb-2 text-[12px] leading-relaxed text-[#667062]">
-                      Supported scope: content, background, color, or layout
-                      only.
+                      Supported scope: content, background, color, layout, or
+                      replace this area with an uploaded image.
                     </p>
                     <textarea
                       autoFocus
                       value={captureComment}
                       onChange={(e) => setCaptureComment(e.target.value)}
-                      placeholder="Example: Change this section background to light green"
-                      className="w-full border border-[#e8e6df] rounded-xl p-2 text-[13px] outline-none focus:border-[#49704F] resize-none h-20 mb-3"
+                      placeholder="Example: Replace this image with the uploaded one"
+                      className="w-full border border-[#e8e6df] rounded-xl p-2 text-[13px] outline-none focus:border-[#49704F] resize-none h-20"
                     />
-                    <div className="flex gap-2 justify-end">
+                    <input
+                      ref={captureImageInputRef}
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        if (file) void handleCaptureImageSelected(file);
+                        event.target.value = "";
+                      }}
+                    />
+                    {captureImages.length > 0 && (
+                      <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
+                        {captureImages.map((image) => (
+                          <div
+                            key={image.id}
+                            className="relative h-14 w-14 shrink-0 overflow-hidden rounded-xl border border-[#d9e3d1] bg-[#f7f4ec]"
+                            title={image.fileName}
+                          >
+                            <img
+                              src={image.localUrl}
+                              alt={image.fileName}
+                              className="h-full w-full object-cover"
+                            />
+                            {image.uploading && (
+                              <div className="absolute inset-0 flex items-center justify-center bg-[#233227]/55 text-white">
+                                <span className="material-symbols-outlined animate-spin text-[15px]">
+                                  progress_activity
+                                </span>
+                              </div>
+                            )}
+                            {image.error && (
+                              <div className="absolute inset-0 flex items-center justify-center bg-red-600/75 px-1 text-center text-[9px] font-bold text-white">
+                                Upload lỗi
+                              </div>
+                            )}
+                            {image.cloudUrl && !image.uploading && !image.error && (
+                              <div className="absolute bottom-0 left-0 right-0 bg-[#49704F]/90 py-0.5 text-center text-[8px] font-bold text-white">
+                                Uploaded
+                              </div>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveCaptureImage(image.id)}
+                              className="absolute right-0.5 top-0.5 flex h-4 w-4 items-center justify-center rounded-full border border-[#d9d1c3] bg-white/90 text-[#6c7466] hover:text-[#233227]"
+                              aria-label="Remove uploaded image"
+                            >
+                              <span className="material-symbols-outlined text-[10px]">
+                                close
+                              </span>
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => captureImageInputRef.current?.click()}
+                      disabled={isSubmittingCapture}
+                      className="mt-2 inline-flex items-center gap-1.5 rounded-full border border-[#ccd7cc] bg-[#f7fbf4] px-3 py-1.5 text-[11px] font-bold text-[#49704F] hover:bg-[#eef7e9] disabled:opacity-50"
+                    >
+                      <span className="material-symbols-outlined text-[14px]">
+                        add_photo_alternate
+                      </span>
+                      Attach replacement image
+                    </button>
+                    <div className="mt-3 flex gap-2 justify-end">
                       <button
                         onClick={cancelCaptureFlow}
                         className="text-[#5c6860] text-[12px] font-bold px-3 py-1.5 rounded-lg hover:bg-[#e8e6df]/50"
@@ -1565,7 +1939,12 @@ const Editor: React.FC = () => {
                       </button>
                       <button
                         onClick={handleSaveCapture}
-                        disabled={isSubmittingCapture || !captureComment.trim()}
+                        disabled={
+                          isSubmittingCapture ||
+                          captureImageUploading ||
+                          captureImageFailed ||
+                          !captureComment.trim()
+                        }
                         className="bg-[#49704F] disabled:opacity-50 text-white text-[12px] font-bold px-4 py-1.5 rounded-lg hover:bg-[#346E56]"
                       >
                         {isSubmittingCapture ? "Saving..." : "Save"}
@@ -1734,6 +2113,34 @@ const Editor: React.FC = () => {
                             <p className="text-[13px] leading-relaxed text-[#556255]">
                               {cap.comment || "No edit request provided."}
                             </p>
+                            {cap.replacementImages && cap.replacementImages.length > 0 && (
+                              <div className="mt-3 rounded-2xl border border-[#e1eadb] bg-[#f7fbf4] p-2">
+                                <div className="mb-2 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.16em] text-[#49704F]">
+                                  <span className="material-symbols-outlined text-[13px]">
+                                    add_photo_alternate
+                                  </span>
+                                  Replacement image
+                                </div>
+                                <div className="flex gap-2 overflow-x-auto">
+                                  {cap.replacementImages.map((image) => (
+                                    <a
+                                      key={image.id}
+                                      href={image.publicUrl}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="block h-14 w-14 shrink-0 overflow-hidden rounded-xl border border-[#d5e2cf] bg-white"
+                                      title={image.fileName}
+                                    >
+                                      <img
+                                        src={image.publicUrl}
+                                        alt={image.fileName}
+                                        className="h-full w-full object-cover"
+                                      />
+                                    </a>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
                           </div>
                         </div>
                       ))}
@@ -1904,8 +2311,75 @@ const Editor: React.FC = () => {
                   </div>
                 )}
 
+                {chatImages.length > 0 && (
+                  <div className="px-3 pt-2 pb-1 overflow-x-auto">
+                    <div className="flex gap-2">
+                      {chatImages.map((image) => (
+                        <div
+                          key={image.id}
+                          className="relative shrink-0 w-16 h-16 rounded-xl border border-[#d9e3d1] overflow-hidden bg-[#f7f4ec]"
+                          title={image.fileName}
+                        >
+                          <img
+                            src={image.localUrl}
+                            alt={image.fileName}
+                            className="w-full h-full object-cover"
+                          />
+                          {image.uploading && (
+                            <div className="absolute inset-0 flex items-center justify-center bg-[#233227]/55 text-white">
+                              <span className="material-symbols-outlined animate-spin text-[16px]">
+                                progress_activity
+                              </span>
+                            </div>
+                          )}
+                          {image.error && (
+                            <div className="absolute inset-0 flex items-center justify-center bg-red-600/75 px-1 text-center text-[9px] font-bold text-white">
+                              Upload lỗi
+                            </div>
+                          )}
+                          {image.cloudUrl && !image.uploading && !image.error && (
+                            <div className="absolute bottom-0 left-0 right-0 bg-[#49704F]/90 py-0.5 text-center text-[9px] font-bold text-white">
+                              Uploaded
+                            </div>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveChatImage(image.id)}
+                            className="absolute right-0.5 top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-white/90 border border-[#d9d1c3] text-[#6c7466] hover:text-[#233227] transition-colors"
+                            aria-label="Remove uploaded image"
+                          >
+                            <span className="material-symbols-outlined text-[10px]">close</span>
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 <div className="px-3 py-3">
+                  <input
+                    ref={chatImageInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      if (file) void handleChatImageSelected(file);
+                      event.target.value = "";
+                    }}
+                  />
                   <div className="flex gap-2 items-center">
+                    <button
+                      type="button"
+                      onClick={() => chatImageInputRef.current?.click()}
+                      disabled={isSendingAiRequest}
+                      className="h-9 w-9 rounded-full border border-[#ccd7cc] bg-white text-[#49704F] flex shrink-0 items-center justify-center hover:bg-[#f0f5ed] disabled:opacity-50 transition-colors"
+                      title="Upload image for replacement or section background"
+                    >
+                      <span className="material-symbols-outlined text-[17px]">
+                        add_photo_alternate
+                      </span>
+                    </button>
                     <input
                       value={chatInput}
                       onChange={(e) => setChatInput(e.target.value)}
