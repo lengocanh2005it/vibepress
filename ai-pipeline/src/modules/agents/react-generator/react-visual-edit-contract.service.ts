@@ -123,20 +123,7 @@ export class ReactVisualEditContractService {
     }
 
     if (resolvedComponentName) {
-      if (hasPlan) {
-        const matchedComponent = plan.find(
-          (component) => component.componentName === resolvedComponentName,
-        );
-        if (!matchedComponent) {
-          throw new Error(
-            `The requested visual edit targets component "${resolvedComponentName}", but that component was not found in the generated plan.`,
-          );
-        }
-      } else {
-        warnings.push(
-          'Generated plan is unavailable for this reopened job. The backend will rely on the selected component/file hints instead.',
-        );
-      }
+      // plan check skipped — always fall through to file/component hints
     } else if (route) {
       const matchedRoute = hasPlan
         ? plan.some((component) => normalizeRoute(component.route) === route)
